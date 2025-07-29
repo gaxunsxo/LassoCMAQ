@@ -1,0 +1,28 @@
+# R files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.Rapp.history
+
+# RStudio project files
+*.Rproj
+
+# Environment/Package management
+renv/library/
+renv/python/
+renv/staging/
+renv.lock
+
+# OS & Misc
+.DS_Store
+*.log
+*.bak
+*.swp
+*.tmp
+
+# Local files
+*.rds
+*.rdata
+*.RData
+data/
