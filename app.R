@@ -6,6 +6,8 @@ library(ggplot2)
 library(sf)
 library(cowplot)
 library(rhandsontable)
+library(shinycssloaders)
+library(shinyjs)
 
 # === Load spatial data ===
 asia_map <- st_read("/ext_hdd_data1/hwlee/Climate/Data/Mapping_shp/Asia_county_map.shp")
@@ -27,29 +29,43 @@ factor_names <- c("Power", "Industrial", "Mobile", "Residential", "Agriculture",
 
 # === UI ===
 ui <- fluidPage(
+  useShinyjs(),
   titlePanel("Air Pollution Prediction Scenario Simulator"),
+  wellPanel(
+    h4("🔎 How to Use This App"),
+    tags$ul(
+      tags$li("Fill in emission control values by region and factor."),
+      tags$li("Use the top-left input to apply a global value to all cells."),
+      tags$li("Click 'Apply Row/Col' to fill based on headers."),
+      tags$li("Click 'Apply Table' after manual edits."),
+      tags$li("Finally, click 'Run Prediction' to generate air pollution maps.")
+    )
+  ),
   fluidRow(
     column(
       width = 6,
       h4("Scenario Input by Region and Factor"),
-      numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0),
+      numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0.5, max = 1.5),
       actionButton("apply_all", "Apply to All"),
       actionButton("apply_rc", "Apply Row/Column Inputs"),
       actionButton("apply_table", "Apply Edited Table"),
       br(), br(),
       rHandsontableOutput("scenario_table"),
       br(),
-      actionButton("predict_btn", "Run Prediction")
+      actionButton("predict_btn", "Run Prediction"),
+      br(), br(),
+      downloadButton("download_scenario", "Download Scenario CSV"),
+      downloadButton("download_prediction", "Download Prediction RDS")
     ),
     column(
       width = 6,
       h4("Prediction Results"),
       tabsetPanel(
-        tabPanel("All", plotOutput("plot_all", height = "800px", width = "100%")),
-        tabPanel("January", plotOutput("plot_jan", height = "800px", width = "100%")),
-        tabPanel("April", plotOutput("plot_apr", height = "800px", width = "100%")),
-        tabPanel("July", plotOutput("plot_jul", height = "800px", width = "100%")),
-        tabPanel("October", plotOutput("plot_oct", height = "800px", width = "100%"))
+        tabPanel("All", withSpinner(plotOutput("plot_all", height = "800px", width = "100%"))),
+        tabPanel("January", withSpinner(plotOutput("plot_jan", height = "800px", width = "100%"))),
+        tabPanel("April", withSpinner(plotOutput("plot_apr", height = "800px", width = "100%"))),
+        tabPanel("July", withSpinner(plotOutput("plot_jul", height = "800px", width = "100%"))),
+        tabPanel("October", withSpinner(plotOutput("plot_oct", height = "800px", width = "100%")))
       )
     )
   )
@@ -150,6 +166,10 @@ server <- function(input, output, session) {
       showModal(modalDialog("Please fill in all cells with numeric values.", easyClose = TRUE))
       return()
     }
+    if (any(df < 0.5 | df > 1.5, na.rm = TRUE)) {
+      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE))
+      return()
+    }
     
     control_vec <- as.numeric(t(as.matrix(df)))
     result <- predict_pollutant(control_vec)
@@ -244,6 +264,55 @@ server <- function(input, output, session) {
     
     final_plot_with_title
   }, res = 96)
+  
+  # Scenario download handler
+  output$download_scenario <- downloadHandler(
+    filename = function() {
+      paste0("scenario_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      df <- scenario_df()
+      df_trimmed <- df[-1, -1]
+      rownames(df_trimmed) <- rownames(df)[-1]
+      colnames(df_trimmed) <- colnames(df)[-1]
+      write.csv(df_trimmed, file, row.names = TRUE)
+    }
+  )
+  
+  # Prediction result download handler
+  output$download_prediction <- downloadHandler(
+    filename = function() {
+      paste0("prediction_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
+    },
+    content = function(file) {
+      result <- result_list()
+      if (!is.null(result)) saveRDS(result, file)
+    }
+  )
+  
+  # Scenario download popup
+  observeEvent(input$download_scenario, {
+    shinyjs::delay(500, {
+      showModal(modalDialog(
+        title = "📥 Download Complete",
+        "The scenario file has been successfully saved.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
+    })
+  })
+  
+  # Prediction result download popup
+  observeEvent(input$download_prediction, {
+    shinyjs::delay(500, {
+      showModal(modalDialog(
+        title = "📥 Download Complete",
+        "The prediction result file has been successfully saved.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
+    })
+  })
 }
 
 shinyApp(ui, server)
