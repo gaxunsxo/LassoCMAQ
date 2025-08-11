@@ -8,6 +8,7 @@ library(cowplot)
 library(rhandsontable)
 library(shinycssloaders)
 library(shinyjs)
+library(shinydashboard)
 
 # === Load spatial data ===
 asia_map <- st_read("/ext_hdd_data1/hwlee/Climate/Data/Mapping_shp/Asia_county_map.shp")
@@ -28,44 +29,136 @@ region_names <- c("Seoul", "Incheon", "Busan", "Daegu", "Gwangju", "Gyeonggi", "
 factor_names <- c("Power", "Industrial", "Mobile", "Residential", "Agriculture", "Solvent", "Others")
 
 # === UI ===
-ui <- fluidPage(
-  useShinyjs(),
-  titlePanel("Air Pollution Prediction Scenario Simulator"),
-  wellPanel(
-    h4("🔎 How to Use This App"),
-    tags$ul(
-      tags$li("Fill in emission control values by region and factor."),
-      tags$li("Use the top-left input to apply a global value to all cells."),
-      tags$li("Click 'Apply Row/Col' to fill based on headers."),
-      tags$li("Click 'Apply Table' after manual edits."),
-      tags$li("Finally, click 'Run Prediction' to generate air pollution maps.")
+ui <- dashboardPage(
+  skin = "black",
+  dashboardHeader(
+    title = tagList(icon("wind"), span("LassoCMAQ"))
+  ),
+  dashboardSidebar(
+    sidebarMenu(id = "tabs",
+                menuItem("Scenario", tabName = "scenario", icon = icon("sliders")),
+                menuItem("Results",  tabName = "results",  icon = icon("map")),
+                menuItem("Download", tabName = "download", icon = icon("download")),
+                menuItem("About",    tabName = "about",    icon = icon("circle-info"))
     )
   ),
-  fluidRow(
-    column(
-      width = 6,
-      h4("Scenario Input by Region and Factor"),
-      numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0.5, max = 1.5),
-      actionButton("apply_all", "Apply to All"),
-      actionButton("apply_rc", "Apply Row/Column Inputs"),
-      actionButton("apply_table", "Apply Edited Table"),
-      br(), br(),
-      rHandsontableOutput("scenario_table"),
-      br(),
-      actionButton("predict_btn", "Run Prediction"),
-      br(), br(),
-      downloadButton("download_scenario", "Download Scenario CSV"),
-      downloadButton("download_prediction", "Download Prediction RDS")
+  dashboardBody(
+    useShinyjs(),
+    tags$head(
+      tags$title("Ozone & PM2.5 Scenario Simulator"), 
+      tags$style(HTML("
+        /* Monotone palette */
+        :root {
+          --accent: #374151;
+          --accent-contrast: #f3f4f6;
+          --panel-border: #4b5563;
+        }
+
+        /* Box style */
+        .box { border:1px solid var(--panel-border) !important; border-radius:12px; overflow:hidden; }
+        .box>.box-header { background:var(--accent) !important; color:var(--accent-contrast) !important; }
+        .box.box-primary, .box.box-info, .box.box-success, .box.box-warning, .box.box-danger {
+          border:1px solid var(--panel-border) !important;
+        }
+        .box.box-primary>.box-header,
+        .box.box-info>.box-header,
+        .box.box-success>.box-header,
+        .box.box-warning>.box-header,
+        .box.box-danger>.box-header {
+          background:var(--accent) !important; color:var(--accent-contrast) !important;
+        }
+        .box.box-solid, .box.box-solid>.box-header { border:1px solid var(--panel-border) !important; }
+        .box.box-solid>.box-header+.box-body, .box .box-body { border-top:1px solid var(--panel-border) !important; }
+
+        /* Buttons, tabs, labels */
+        .btn-primary, .btn-primary:hover, .btn-primary:focus {
+          background-color:var(--accent) !important; border-color:var(--panel-border) !important; color:var(--accent-contrast) !important;
+        }
+        .nav-tabs-custom>.nav-tabs>li.active>a, .nav-tabs-custom>.nav-tabs>li.active>a:focus {
+          background:#f8f9fb; border-color:var(--panel-border) !important;
+        }
+        .nav-tabs-custom>.nav-tabs>li>a { color:var(--accent); }
+        .progress-bar, .label-primary, .bg-light-blue { background-color:var(--accent) !important; color:var(--accent-contrast) !important; }
+
+        /* Layout adjustments */
+        .main-header { position:fixed; top:0; width:100%; z-index:1000; }
+        .main-sidebar { position:fixed; height:100vh; }
+        .content-wrapper, .right-side, .main-footer { margin-top:50px; }
+        .content-wrapper, .right-side { margin-left:230px; }
+        .content { max-width:1600px; margin:0 auto; }
+      "))
     ),
-    column(
-      width = 6,
-      h4("Prediction Results"),
-      tabsetPanel(
-        tabPanel("All", withSpinner(plotOutput("plot_all", height = "800px", width = "100%"))),
-        tabPanel("January", withSpinner(plotOutput("plot_jan", height = "800px", width = "100%"))),
-        tabPanel("April", withSpinner(plotOutput("plot_apr", height = "800px", width = "100%"))),
-        tabPanel("July", withSpinner(plotOutput("plot_jul", height = "800px", width = "100%"))),
-        tabPanel("October", withSpinner(plotOutput("plot_oct", height = "800px", width = "100%")))
+    
+    tabItems(
+      # Scenario Tab
+      tabItem(tabName = "scenario",
+              fluidRow(
+                box(
+                  title = "How to Use", width = 12, status = "primary", solidHeader = TRUE,
+                  h4("🔎 How to Use This App"),
+                  tags$ul(
+                    tags$li("Fill in emission control values by region and factor."),
+                    tags$li("Or upload a scenario CSV file."),
+                    tags$li("Use the top-left input to apply a global value to all cells."),
+                    tags$li("Click 'Apply Row/Col' to fill based on headers."),
+                    tags$li("Click 'Apply Table' after manual edits."),
+                    tags$li("Finally, click 'Run Prediction' to generate air pollution maps.")
+                  )
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Scenario Controls", width = 5, status = "warning", solidHeader = TRUE,
+                  fileInput("upload_scenario", "Upload Scenario CSV",
+                            accept = c(".csv"), buttonLabel = "Browse..."),
+                  numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0.5, max = 1.5),
+                  div(
+                    actionButton("apply_all",  "Apply to All"),
+                    actionButton("apply_rc",   "Apply Row/Column Inputs"),
+                    actionButton("apply_table","Apply Edited Table"),
+                    style = "display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;"
+                  ),
+                  actionButton("predict_btn", "Run Prediction", class = "btn btn-primary")
+                ),
+                box(
+                  title = "Scenario Input by Region and Factor", width = 7, status = "warning", solidHeader = TRUE,
+                  rHandsontableOutput("scenario_table"), br()
+                )
+              )
+      ),
+      
+      # Results Tab
+      tabItem(tabName = "results",
+              box(
+                width = 12, status = "success", solidHeader = TRUE, title = "Prediction Results",
+                tabBox(width = 12, id = "plots_tab",
+                       tabPanel("All",      withSpinner(plotOutput("plot_all", height = "700px", width = "100%"))),
+                       tabPanel("January",  withSpinner(plotOutput("plot_jan", height = "700px", width = "100%"))),
+                       tabPanel("April",    withSpinner(plotOutput("plot_apr", height = "700px", width = "100%"))),
+                       tabPanel("July",     withSpinner(plotOutput("plot_jul", height = "700px", width = "100%"))),
+                       tabPanel("October",  withSpinner(plotOutput("plot_oct", height = "700px", width = "100%")))
+                )
+              )
+      ),
+      
+      # Download Tab
+      tabItem(tabName = "download",
+              box(
+                title = "Export", width = 12, status = "info", solidHeader = TRUE,
+                div(
+                  downloadButton("download_scenario",   "Download Scenario CSV"),
+                  downloadButton("download_prediction", "Download Prediction RDS"),
+                  style = "display:flex; gap:12px; flex-wrap:wrap;"
+                ),
+                helpText("Generate predictions first, then download scenario and results.")
+              )
+      ),
+      
+      # About Tab
+      tabItem(tabName = "about",
+              box(width = 12, title = "About", status = "primary", solidHeader = TRUE,
+                  p("Ozone prediction simulator (Shiny + ggplot2 + sf + cowplot).")
+              )
       )
     )
   )
@@ -82,6 +175,9 @@ server <- function(input, output, session) {
     rownames(df) <- c("Input", region_names)
     df
   })
+  
+  # Uploaded original matrix
+  uploaded_mat <- reactiveVal(NULL)
   
   # Render table
   output$scenario_table <- renderRHandsontable({
@@ -136,6 +232,58 @@ server <- function(input, output, session) {
     }
     
     scenario_df(df)
+  })
+  
+  # Upload CSV → Apply to Table & Store
+  make_extended_scenario <- function(df_trimmed) {
+    stopifnot(is.data.frame(df_trimmed))
+    miss_rows <- setdiff(region_names, rownames(df_trimmed))
+    miss_cols <- setdiff(factor_names, colnames(df_trimmed))
+    if (length(miss_rows) || length(miss_cols)) {
+      stop(paste0("CSV header mismatch.\nMissing rows: ",
+                  paste(miss_rows, collapse=", "),
+                  "\nMissing cols: ",
+                  paste(miss_cols, collapse=", ")))
+    }
+    df_trimmed <- df_trimmed[region_names, factor_names, drop = FALSE]
+    
+    df_num <- as.data.frame(lapply(df_trimmed, as.numeric), check.names = FALSE)
+    rownames(df_num) <- rownames(df_trimmed)
+    if (any(!is.finite(as.matrix(df_num)))) stop("CSV contains non-numeric values.")
+    if (any(df_num < 0.5 | df_num > 1.5))  stop("CSV values must be in [0.5, 1.5].")
+    
+    ext <- as.data.frame(matrix(NA, nrow = length(region_names)+1, ncol = length(factor_names)+1))
+    colnames(ext) <- c("입력", factor_names)
+    rownames(ext) <- c("입력", region_names)
+    ext[-1, -1] <- as.matrix(df_num)
+    
+    attr(ext, "numeric_matrix") <- as.matrix(df_num)
+    ext
+  }
+  
+  observeEvent(input$upload_scenario, {
+    req(input$upload_scenario)
+    tryCatch({
+      df_trimmed <- read.csv(input$upload_scenario$datapath, row.names = 1, check.names = FALSE)
+      ext <- make_extended_scenario(df_trimmed)
+      scenario_df(ext)
+      uploaded_mat(attr(ext, "numeric_matrix"))
+    }, error = function(e) {
+      showModal(modalDialog(
+        title = "Upload Error",
+        paste("Failed to apply CSV:", e$message),
+        easyClose = TRUE
+      ))
+    })
+  })
+  
+  # Get current scenario matrix (prefer uploaded)
+  get_scenario_matrix <- reactive({
+    if (!is.null(uploaded_mat())) return(uploaded_mat())
+    df <- scenario_df()
+    m <- suppressWarnings(apply(df[-1, -1], 2, as.numeric))
+    if (any(is.na(m))) return(NULL)
+    m
   })
   
   # Prediction function
