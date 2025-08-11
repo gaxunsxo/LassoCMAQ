@@ -6,6 +6,8 @@ library(ggplot2)
 library(sf)
 library(cowplot)
 library(rhandsontable)
+library(shinycssloaders)
+library(shinyjs)
 
 # === Load spatial data ===
 asia_map <- st_read("/ext_hdd_data1/hwlee/Climate/Data/Mapping_shp/Asia_county_map.shp")
@@ -27,27 +29,43 @@ factor_names <- c("Power", "Industrial", "Mobile", "Residential", "Agriculture",
 
 # === UI ===
 ui <- fluidPage(
+  useShinyjs(),
   titlePanel("Air Pollution Prediction Scenario Simulator"),
+  wellPanel(
+    h4("🔎 How to Use This App"),
+    tags$ul(
+      tags$li("Fill in emission control values by region and factor."),
+      tags$li("Use the top-left input to apply a global value to all cells."),
+      tags$li("Click 'Apply Row/Col' to fill based on headers."),
+      tags$li("Click 'Apply Table' after manual edits."),
+      tags$li("Finally, click 'Run Prediction' to generate air pollution maps.")
+    )
+  ),
   fluidRow(
     column(
       width = 6,
       h4("Scenario Input by Region and Factor"),
-      numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0),
+      numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0.5, max = 1.5),
       actionButton("apply_all", "Apply to All"),
+      actionButton("apply_rc", "Apply Row/Column Inputs"),
+      actionButton("apply_table", "Apply Edited Table"),
       br(), br(),
       rHandsontableOutput("scenario_table"),
       br(),
-      actionButton("predict_btn", "Run Prediction")
+      actionButton("predict_btn", "Run Prediction"),
+      br(), br(),
+      downloadButton("download_scenario", "Download Scenario CSV"),
+      downloadButton("download_prediction", "Download Prediction RDS")
     ),
     column(
       width = 6,
       h4("Prediction Results"),
       tabsetPanel(
-        tabPanel("All", plotOutput("plot_all", height = "800px", width = "100%")),
-        tabPanel("January", plotOutput("plot_jan", height = "800px", width = "100%")),
-        tabPanel("April", plotOutput("plot_apr", height = "800px", width = "100%")),
-        tabPanel("July", plotOutput("plot_jul", height = "800px", width = "100%")),
-        tabPanel("October", plotOutput("plot_oct", height = "800px", width = "100%"))
+        tabPanel("All", withSpinner(plotOutput("plot_all", height = "800px", width = "100%"))),
+        tabPanel("January", withSpinner(plotOutput("plot_jan", height = "800px", width = "100%"))),
+        tabPanel("April", withSpinner(plotOutput("plot_apr", height = "800px", width = "100%"))),
+        tabPanel("July", withSpinner(plotOutput("plot_jul", height = "800px", width = "100%"))),
+        tabPanel("October", withSpinner(plotOutput("plot_oct", height = "800px", width = "100%")))
       )
     )
   )
@@ -56,34 +74,67 @@ ui <- fluidPage(
 # === Server ===
 server <- function(input, output, session) {
   
-  # Initialize scenario table
+  # Extended scenario table
   scenario_df <- reactiveVal({
-    df <- data.frame(matrix(0.5, nrow = length(region_names), ncol = length(factor_names)))
-    colnames(df) <- factor_names
-    rownames(df) <- region_names
+    df <- matrix(NA, nrow = length(region_names) + 1, ncol = length(factor_names) + 1)
+    df <- as.data.frame(df)
+    colnames(df) <- c("Input", factor_names)
+    rownames(df) <- c("Input", region_names)
     df
   })
   
   # Render table
   output$scenario_table <- renderRHandsontable({
-    rhandsontable(scenario_df(), useTypes = FALSE, stretchH = "all", rowHeaderWidth = 100) %>%
-      hot_cols(colWidths = 80) %>%
-      hot_col(col = factor_names, format = "0.0000000") %>%
+    input$apply_rc
+    input$apply_all
+    input$apply_table
+    df <- scenario_df()
+    req(df)
+    rhandsontable(df, useTypes = FALSE, stretchH = "all", rowHeaderWidth = 120) %>%
       hot_table(highlightCol = TRUE, highlightRow = TRUE)
   })
   
-  # Update reactive table
-  observeEvent(input$scenario_table, {
-    if (!is.null(input$scenario_table)) {
-      scenario_df(hot_to_r(input$scenario_table))
-    }
+  # Apply edited table via button
+  observeEvent(input$apply_table, {
+    req(input$scenario_table)
+    tryCatch({
+      updated_df <- hot_to_r(input$scenario_table)
+      if (!is.null(updated_df) && is.data.frame(updated_df)) {
+        scenario_df(updated_df)
+      }
+    }, error = function(e) {
+      cat("hot_to_r error:", e$message, "\n")
+    })
   })
   
-  # Apply global value to all cells
+  # Apply to all
   observeEvent(input$apply_all, {
     val <- input$global_value
     df <- scenario_df()
-    df[,] <- val
+    df[2:nrow(df), 2:ncol(df)] <- val
+    scenario_df(df)
+  })
+  
+  # Apply row/col header values
+  observeEvent(input$apply_rc, {
+    req(input$scenario_table)
+    
+    df <- hot_to_r(input$scenario_table)
+    
+    for (j in 2:ncol(df)) {
+      val <- df[1, j]
+      if (!is.na(val)) {
+        df[2:nrow(df), j] <- val
+      }
+    }
+    
+    for (i in 2:nrow(df)) {
+      val <- df[i, 1]
+      if (!is.na(val)) {
+        df[i, 2:ncol(df)] <- val
+      }
+    }
+    
     scenario_df(df)
   })
   
@@ -110,9 +161,13 @@ server <- function(input, output, session) {
   
   # Run prediction
   observeEvent(input$predict_btn, {
-    df <- scenario_df()
+    df <- scenario_df()[-1, -1]  # exclude header row/col
     if (any(is.na(df))) {
       showModal(modalDialog("Please fill in all cells with numeric values.", easyClose = TRUE))
+      return()
+    }
+    if (any(df < 0.5 | df > 1.5, na.rm = TRUE)) {
+      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE))
       return()
     }
     
@@ -159,7 +214,7 @@ server <- function(input, output, session) {
       labs(title = title_text) +
       theme_minimal() +
       theme(
-        plot.title = element_text(hjust = 0.5, face = "bold", size = 20),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
         legend.title = element_text(size = 14, face = "bold"),
         legend.text = element_text(size = 12),
         axis.title = element_text(size = 12, face = "bold"),
@@ -204,11 +259,60 @@ server <- function(input, output, session) {
     )
     
     final_plot_with_title <- ggdraw() +
-      draw_label("Ozone Prediction Maps", fontface = 'bold', size = 30, hjust = 0.5, x = 0.5, y = 0.95) +
+      draw_label("Ozone Prediction Maps", fontface = 'bold', size = 20, hjust = 0.5, x = 0.5, y = 0.95) +
       draw_plot(final_plot, y = 0, height = 0.9)
     
     final_plot_with_title
   }, res = 96)
+  
+  # Scenario download handler
+  output$download_scenario <- downloadHandler(
+    filename = function() {
+      paste0("scenario_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      df <- scenario_df()
+      df_trimmed <- df[-1, -1]
+      rownames(df_trimmed) <- rownames(df)[-1]
+      colnames(df_trimmed) <- colnames(df)[-1]
+      write.csv(df_trimmed, file, row.names = TRUE)
+    }
+  )
+  
+  # Prediction result download handler
+  output$download_prediction <- downloadHandler(
+    filename = function() {
+      paste0("prediction_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
+    },
+    content = function(file) {
+      result <- result_list()
+      if (!is.null(result)) saveRDS(result, file)
+    }
+  )
+  
+  # Scenario download popup
+  observeEvent(input$download_scenario, {
+    shinyjs::delay(500, {
+      showModal(modalDialog(
+        title = "📥 Download Complete",
+        "The scenario file has been successfully saved.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
+    })
+  })
+  
+  # Prediction result download popup
+  observeEvent(input$download_prediction, {
+    shinyjs::delay(500, {
+      showModal(modalDialog(
+        title = "📥 Download Complete",
+        "The prediction result file has been successfully saved.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
+    })
+  })
 }
 
 shinyApp(ui, server)
