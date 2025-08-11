@@ -6,6 +6,8 @@ library(ggplot2)
 library(sf)
 library(cowplot)
 library(rhandsontable)
+library(shinycssloaders)
+library(shinyjs)
 library(shinydashboard)
 
 # === Load spatial data ===
@@ -312,6 +314,10 @@ server <- function(input, output, session) {
       showModal(modalDialog("Please fill in all cells with numeric values.", easyClose = TRUE))
       return()
     }
+    if (any(df < 0.5 | df > 1.5, na.rm = TRUE)) {
+      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE))
+      return()
+    }
     
     control_vec <- as.numeric(t(as.matrix(df)))
     result <- predict_pollutant(control_vec)
@@ -406,6 +412,55 @@ server <- function(input, output, session) {
     
     final_plot_with_title
   }, res = 96)
+  
+  # Scenario download handler
+  output$download_scenario <- downloadHandler(
+    filename = function() {
+      paste0("scenario_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      df <- scenario_df()
+      df_trimmed <- df[-1, -1]
+      rownames(df_trimmed) <- rownames(df)[-1]
+      colnames(df_trimmed) <- colnames(df)[-1]
+      write.csv(df_trimmed, file, row.names = TRUE)
+    }
+  )
+  
+  # Prediction result download handler
+  output$download_prediction <- downloadHandler(
+    filename = function() {
+      paste0("prediction_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
+    },
+    content = function(file) {
+      result <- result_list()
+      if (!is.null(result)) saveRDS(result, file)
+    }
+  )
+  
+  # Scenario download popup
+  observeEvent(input$download_scenario, {
+    shinyjs::delay(500, {
+      showModal(modalDialog(
+        title = "📥 Download Complete",
+        "The scenario file has been successfully saved.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
+    })
+  })
+  
+  # Prediction result download popup
+  observeEvent(input$download_prediction, {
+    shinyjs::delay(500, {
+      showModal(modalDialog(
+        title = "📥 Download Complete",
+        "The prediction result file has been successfully saved.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
+    })
+  })
 }
 
 shinyApp(ui, server)
