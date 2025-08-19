@@ -11,16 +11,25 @@ library(shinyjs)
 library(shinydashboard)
 
 # === Load spatial data ===
-asia_map <- st_read("/ext_hdd_data1/hwlee/Climate/Data/Mapping_shp/Asia_county_map.shp")
-mesh <- st_read("/ext_hdd_data1/hwlee/Climate/Data/Mapping_shp/Mesh_test_shift2.shp")
-asia_map <- st_set_crs(asia_map, 102012)
-mesh <- st_set_crs(mesh, 102012)
+asia_map <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Asia_county_map.shp")
+mesh <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp")
+st_crs(asia_map) <- NA
+st_crs(mesh)     <- NA
+st_crs(asia_map) <- 4326
+st_crs(mesh)     <- 4326
 
-# === Load prediction-related data ===
-load("/ext_hdd_data1/hwlee/Climate/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
-load("/ext_hdd_data1/hwlee/Climate/O3/Adaptive_logit/Total/O3_BIAS.RData")
-load("/ext_hdd_data1/hwlee/Climate/O3/Adaptive_logit/Total/O3_ADAPT.RData")
-load("/ext_hdd_data1/hwlee/Climate/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
+# === Load prediction-related data (O3) ===
+load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
+load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
+load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_ADAPT.RData")
+load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
+
+# === Load prediction-related data (PM2.5) ===
+load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
+load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
+load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ.RData")
+load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_BIAS.RData")
+load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_ADAPT.RData")
 
 region_names <- c("Seoul", "Incheon", "Busan", "Daegu", "Gwangju", "Gyeonggi", "Gangwon", "Chung-Buk",
                   "Chung-Nam", "Gyeong-Buk", "Gyeong-Nam", "Jeon-Buk", "Jeon-Nam", "Jeju", "Daejun",
@@ -109,6 +118,12 @@ ui <- dashboardPage(
               fluidRow(
                 box(
                   title = "Scenario Controls", width = 5, status = "warning", solidHeader = TRUE,
+                  radioButtons(
+                    "display_pollutant", "Display pollutant",
+                    choices = c("O3" = "o3", "PM2.5" = "pm"),
+                    inline = TRUE, selected = "o3"
+                  ),
+                  checkboxInput("compute_both", "Compute both (O3 + PM2.5)", value = TRUE), br(),
                   fileInput("upload_scenario", "Upload Scenario CSV",
                             accept = c(".csv"), buttonLabel = "Browse..."),
                   numericInput("global_value", "Apply Value to All Cells", value = 0.5, min = 0.5, max = 1.5),
@@ -136,7 +151,18 @@ ui <- dashboardPage(
                        tabPanel("January",  withSpinner(plotOutput("plot_jan", height = "700px", width = "100%"))),
                        tabPanel("April",    withSpinner(plotOutput("plot_apr", height = "700px", width = "100%"))),
                        tabPanel("July",     withSpinner(plotOutput("plot_jul", height = "700px", width = "100%"))),
-                       tabPanel("October",  withSpinner(plotOutput("plot_oct", height = "700px", width = "100%")))
+                       tabPanel("October",  withSpinner(plotOutput("plot_oct", height = "700px", width = "100%"))),
+                       tabPanel("Both (Compare)",
+                                withSpinner(plotOutput("plot_compare_all", height = "1100px", width = "100%"))
+                       ),
+                       tabPanel("Compare by Month",
+                                radioButtons(
+                                  "compare_month", "Month",
+                                  choices = c("January"="Jan","April"="Apr","July"="Jul","October"="Oct"),
+                                  inline = TRUE, selected = "Jan"
+                                ),
+                                withSpinner(plotOutput("plot_compare_month", height = "700px", width = "100%"))
+                       )
                 )
               )
       ),
@@ -286,131 +312,209 @@ server <- function(input, output, session) {
     m
   })
   
+  # Models
+  models <- list(
+    o3 = list(
+      WEIGHT = O3_WEIGHT,
+      BIAS   = O3_BIAS,     # dims e.g. [N, 24, 123]
+      ADAPT  = O3_Adapt,
+      CMAQ_UNIQUE = O3_CMAQ_UNIQUE,
+      SCALE  = 1000,        # ppb 스케일링(기존 코드 유지)
+      MONTH_IDXS = list(Jan = 1:31, Apr = 32:61, Jul = 62:92, Oct = 93:123)
+    ),
+    pm = list(
+      WEIGHT = PM_WEIGHT,
+      BIAS   = PM_BIAS,
+      ADAPT  = PM_Adapt,
+      CMAQ_UNIQUE = PM_CMAQ_UNIQUE,
+      SCALE  = 1,           # µg/m³ 가정
+      MONTH_IDXS = list(Jan = 1:31, Apr = 32:61, Jul = 62:92, Oct = 93:123)
+    )
+  )
+  
   # Prediction function
-  predict_pollutant <- function(control_vec) {
-    linear_vec <- as.vector(control_vec %*% O3_WEIGHT)
-    linear_arr <- array(linear_vec, dim = c(5494, 24, 123))
-    linear_pred <- linear_arr + O3_BIAS
-    
-    Pred <- O3_Adapt / (1 + exp(-linear_pred))
-    Pred[O3_CMAQ_UNIQUE] <- O3_BIAS[O3_CMAQ_UNIQUE]
-    
-    results <- Pred * 1000
-
+  predict_with_model <- function(control_vec, model) {
+    linear_vec <- as.vector(control_vec %*% model$WEIGHT)
+    dims <- dim(model$BIAS)  # e.g. c(N, 24, 123)
+    linear_arr <- array(linear_vec, dim = dims)
+    linear_pred <- linear_arr + model$BIAS
+    Pred <- model$ADAPT / (1 + exp(-linear_pred))
+    if (!is.null(model$CMAQ_UNIQUE)) {
+      Pred[model$CMAQ_UNIQUE] <- model$BIAS[model$CMAQ_UNIQUE]
+    }
+    Pred <- Pred * model$SCALE
     list(
-      Jan = results[, , 1:31],
-      Apr = results[, , 32:61],
-      Jul = results[, , 62:92],
-      Oct = results[, , 93:123]
+      Jan = Pred[, , model$MONTH_IDXS$Jan, drop = FALSE],
+      Apr = Pred[, , model$MONTH_IDXS$Apr, drop = FALSE],
+      Jul = Pred[, , model$MONTH_IDXS$Jul, drop = FALSE],
+      Oct = Pred[, , model$MONTH_IDXS$Oct, drop = FALSE]
     )
   }
   
-  result_list <- reactiveVal(NULL)
+  result_store <- reactiveVal(list(o3 = NULL, pm = NULL))
   
   # Run prediction
   observeEvent(input$predict_btn, {
-    df <- scenario_df()[-1, -1]  # exclude header row/col
+    df <- scenario_df()[-1, -1]
     if (any(is.na(df))) {
-      showModal(modalDialog("Please fill in all cells with numeric values.", easyClose = TRUE))
-      return()
+      showModal(modalDialog("Please fill in all cells with numeric values.", easyClose = TRUE)); return()
     }
     if (any(df < 0.5 | df > 1.5, na.rm = TRUE)) {
-      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE))
-      return()
+      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE)); return()
+    }
+    control_vec <- as.numeric(t(as.matrix(df)))
+    
+    need_o3 <- isTRUE(input$compute_both) || identical(input$display_pollutant, "o3")
+    need_pm <- isTRUE(input$compute_both) || identical(input$display_pollutant, "pm")
+    
+    store <- result_store()
+    t_o3 <- NA_real_
+    t_pm <- NA_real_
+    
+    if (need_o3) {
+      t_o3 <- system.time({
+        store$o3 <- predict_with_model(control_vec, models$o3)
+      })["elapsed"]
+      print(paste("O3 prediction elapsed:", round(t_o3, 3), "sec"))
     }
     
-    control_vec <- as.numeric(t(as.matrix(df)))
-    result <- predict_pollutant(control_vec)
+    if (need_pm) {
+      t_pm <- system.time({
+        store$pm <- predict_with_model(control_vec, models$pm)
+      })["elapsed"]
+      print(paste("PM2.5 prediction elapsed:", round(t_pm, 3), "sec"))
+    }
     
-    mesh$Jan <<- apply(result$Jan, 1, mean)
-    mesh$Apr <<- apply(result$Apr, 1, mean)
-    mesh$Jul <<- apply(result$Jul, 1, mean)
-    mesh$Oct <<- apply(result$Oct, 1, mean)
+    result_store(store)
     
-    result_list(result)
+    total <- sum(na.omit(c(t_o3, t_pm)))
+    print(paste("Total prediction time:", round(total, 3), "sec"))
   })
   
+  # Map helpers
+  month_means <- function(arr3) { apply(arr3, 1, mean) }  # [N, 24, D] → mean over 24*D by grid
+  
+  mesh_for <- function(pol, store = result_store()) {
+    preds <- store[[pol]]
+    validate(need(!is.null(preds), paste0("Run prediction for ", toupper(pol), " first.")))
+    m <- mesh
+    m$Jan <- month_means(preds$Jan)
+    m$Apr <- month_means(preds$Apr)
+    m$Jul <- month_means(preds$Jul)
+    m$Oct <- month_means(preds$Oct)
+    m
+  }
+  
+  legend_label_for <- function(pol) {
+    if (pol == "o3") "Mean (ppb)" else "Mean (µg/m³)"
+  }
+  
   # Shared fill scale for consistent color
-  get_shared_fill_scale <- function() {
-    all_vals <- c(mesh$Jan, mesh$Apr, mesh$Jul, mesh$Oct)
-    
-    rmse_min <- floor(min(all_vals, na.rm = TRUE) / 10) * 10
-    rmse_max <- ceiling(max(all_vals, na.rm = TRUE) / 10) * 10
-    rmse_breaks <- pretty(c(rmse_min, rmse_max), n = 5)
-    
-    scale_fill_gradient(
-      low = "white", high = "red",
-      limits = c(rmse_min, rmse_max),
-      breaks = rmse_breaks,
-      name = "Mean\n(ppb)"
-    )
+  get_shared_fill_scale <- function(m, legend_title) {
+    all_vals <- c(m$Jan, m$Apr, m$Jul, m$Oct)
+    vmin <- floor(min(all_vals, na.rm = TRUE) / 10) * 10
+    vmax <- ceiling(max(all_vals, na.rm = TRUE) / 10) * 10
+    scale_fill_gradient(low = "white", high = "red",
+                        limits = c(vmin, vmax),
+                        breaks = pretty(c(vmin, vmax), n = 5),
+                        name = legend_title)
   }
   
   # Plot single map
-  plot_map <- function(var_name, title_text, show_legend = TRUE) {
-    if (!var_name %in% colnames(mesh)) {
-      return(ggplot() + labs(title = paste(title_text, "(No data)")))
-    }
-    
+  plot_map <- function(m, var_name, legend_title, title_text, show_legend = TRUE) {
     p <- ggplot() +
       geom_sf(data = asia_map, color = 'black', fill = NA) +
-      geom_sf(data = mesh, aes(fill = .data[[var_name]]), alpha = 0.6, color = "gray") +
+      geom_sf(data = m, aes(fill = .data[[var_name]]), alpha = 0.6, color = "gray") +
       coord_sf(xlim = c(124, 131), ylim = c(32.5, 39.5), expand = FALSE) +
-      scale_x_continuous(expand = c(0, 0)) +
-      scale_y_continuous(expand = c(0, 0)) +
-      get_shared_fill_scale() +
+      scale_x_continuous(expand = c(0, 0), labels = ~ as.character(round(.))) +
+      scale_y_continuous(expand = c(0, 0), labels = ~ as.character(round(.))) +
+      get_shared_fill_scale(m, legend_title) +
       labs(title = title_text) +
       theme_minimal() +
       theme(
         plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
         legend.title = element_text(size = 14, face = "bold"),
-        legend.text = element_text(size = 12),
-        axis.title = element_text(size = 12, face = "bold"),
-        axis.text = element_text(size = 12)
+        legend.text  = element_text(size = 12),
+        axis.text    = element_text(size = 12)
       )
-    
-    if (!show_legend) {
-      p <- p + theme(legend.position = "none")
-    }
-    
-    return(p)
+    if (!show_legend) p <- p + theme(legend.position = "none")
+    p
   }
   
+  selected_mesh <- reactive({
+    store <- result_store()
+    pol   <- req(input$display_pollutant)
+    mesh_for(pol, store)
+  })
+  
   # Render individual monthly plots
-  output$plot_jan <- renderPlot({ req(result_list()); plot_map("Jan", "January") })
-  output$plot_apr <- renderPlot({ req(result_list()); plot_map("Apr", "April") })
-  output$plot_jul <- renderPlot({ req(result_list()); plot_map("Jul", "July") })
-  output$plot_oct <- renderPlot({ req(result_list()); plot_map("Oct", "October") })
+  output$plot_jan <- renderPlot({ m <- selected_mesh(); plot_map(m, "Jan", legend_label_for(input$display_pollutant), "January") })
+  output$plot_apr <- renderPlot({ m <- selected_mesh(); plot_map(m, "Apr", legend_label_for(input$display_pollutant), "April") })
+  output$plot_jul <- renderPlot({ m <- selected_mesh(); plot_map(m, "Jul", legend_label_for(input$display_pollutant), "July") })
+  output$plot_oct <- renderPlot({ m <- selected_mesh(); plot_map(m, "Oct", legend_label_for(input$display_pollutant), "October") })
   
   # Render combined 2x2 plot
   output$plot_all <- renderPlot({
-    req(result_list())
+    m <- selected_mesh()
+    Jan_PLOT <- plot_map(m, "Jan", legend_label_for(input$display_pollutant), "January", FALSE)
+    Apr_PLOT <- plot_map(m, "Apr", legend_label_for(input$display_pollutant), "April",   FALSE)
+    Jul_PLOT <- plot_map(m, "Jul", legend_label_for(input$display_pollutant), "July",    FALSE)
+    Oct_PLOT <- plot_map(m, "Oct", legend_label_for(input$display_pollutant), "October", FALSE)
     
-    Jan_PLOT <- plot_map("Jan", "January", FALSE)
-    Apr_PLOT <- plot_map("Apr", "April", FALSE)
-    Jul_PLOT <- plot_map("Jul", "July", FALSE)
-    Oct_PLOT <- plot_map("Oct", "October", FALSE)
-    
-    legend_plot <- plot_map("Jan", "Legend", TRUE)
+    legend_plot <- plot_map(m, "Jan", legend_label_for(input$display_pollutant), "Legend", TRUE)
     legend <- cowplot::get_legend(legend_plot + theme(legend.position = "right"))
+    grid_main <- cowplot::plot_grid(Jan_PLOT, Apr_PLOT, Jul_PLOT, Oct_PLOT, ncol = 2, align = "hv")
     
-    plot_grid_main <- cowplot::plot_grid(
-      Jan_PLOT, Apr_PLOT,
-      Jul_PLOT, Oct_PLOT,
-      ncol = 2, align = "hv"
+    cowplot::plot_grid(
+      ggdraw() + draw_label(
+        paste0(toupper(input$display_pollutant), " Prediction Maps"),
+        fontface = 'bold', size = 20, hjust = 0.5, x = 0.5, y = 0.95
+      ) + draw_plot(grid_main, y = 0, height = 0.9),
+      legend, rel_widths = c(1, 0.2), ncol = 2
     )
+  }, res = 96)
+  
+  # Compare renders
+  output$plot_compare_all <- renderPlot({
+    store <- result_store()
+    mo3 <- mesh_for("o3", store)
+    mpm <- mesh_for("pm", store)
     
-    final_plot <- cowplot::plot_grid(
-      plot_grid_main, legend,
-      rel_widths = c(1, 0.2),
-      ncol = 2
+    o3_j <- plot_map(mo3, "Jan", legend_label_for("o3"), "January", FALSE)
+    o3_a <- plot_map(mo3, "Apr", legend_label_for("o3"), "April",   FALSE)
+    o3_jl<- plot_map(mo3, "Jul", legend_label_for("o3"), "July",    FALSE)
+    o3_o <- plot_map(mo3, "Oct", legend_label_for("o3"), "October", FALSE)
+    o3_grid <- cowplot::plot_grid(o3_j, o3_a, o3_jl, o3_o, ncol = 2, align = "hv")
+    o3_leg  <- cowplot::get_legend(plot_map(mo3, "Jan", legend_label_for("o3"), "Legend", TRUE) +
+                                     theme(legend.position = "right"))
+    o3_all  <- cowplot::plot_grid(o3_grid, o3_leg, ncol = 2, rel_widths = c(1, 0.2))
+    
+    pm_j <- plot_map(mpm, "Jan", legend_label_for("pm"), "January", FALSE)
+    pm_a <- plot_map(mpm, "Apr", legend_label_for("pm"), "April",   FALSE)
+    pm_jl<- plot_map(mpm, "Jul", legend_label_for("pm"), "July",    FALSE)
+    pm_o <- plot_map(mpm, "Oct", legend_label_for("pm"), "October", FALSE)
+    pm_grid <- cowplot::plot_grid(pm_j, pm_a, pm_jl, pm_o, ncol = 2, align = "hv")
+    pm_leg  <- cowplot::get_legend(plot_map(mpm, "Jan", legend_label_for("pm"), "Legend", TRUE) +
+                                     theme(legend.position = "right"))
+    pm_all  <- cowplot::plot_grid(pm_grid, pm_leg, ncol = 2, rel_widths = c(1, 0.2))
+    
+    cowplot::plot_grid(
+      ggdraw() + draw_label("O3 (ppb) — All Months", fontface = 'bold', size = 18, x = 0.02, hjust = 0),
+      o3_all,
+      ggdraw() + draw_label("PM2.5 (µg/m³) — All Months", fontface = 'bold', size = 18, x = 0.02, hjust = 0),
+      pm_all,
+      ncol = 1, rel_heights = c(0.06, 0.44, 0.06, 0.44)
     )
-    
-    final_plot_with_title <- ggdraw() +
-      draw_label("Ozone Prediction Maps", fontface = 'bold', size = 20, hjust = 0.5, x = 0.5, y = 0.95) +
-      draw_plot(final_plot, y = 0, height = 0.9)
-    
-    final_plot_with_title
+  }, res = 96)
+  
+  output$plot_compare_month <- renderPlot({
+    store <- result_store()
+    pol_month <- req(input$compare_month)
+    mo3 <- mesh_for("o3", store)
+    mpm <- mesh_for("pm", store)
+    o3 <- plot_map(mo3, pol_month, legend_label_for("o3"), paste0("O3 — ", pol_month), TRUE)
+    pm <- plot_map(mpm, pol_month, legend_label_for("pm"), paste0("PM2.5 — ", pol_month), TRUE)
+    cowplot::plot_grid(o3, pm, ncol = 2, align = "h")
   }, res = 96)
   
   # Scenario download handler
