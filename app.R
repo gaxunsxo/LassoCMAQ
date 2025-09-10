@@ -722,12 +722,19 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$o3_plot <- renderPlot({
     t1 <- Sys.time()
     store <- result_store(); req(store$o3)
+    
+    id <- showNotification(
+      "Prediction completed. Preparing the map plot, please wait...",
+      type = "message", duration = NULL, closeButton = FALSE
+    )
+    on.exit(removeNotification(id), add = TRUE)
+    
     m <- mesh_with_vals(store$o3, models$o3)
     p <- plot_map(m, "Year", "Mean (ppb)", "Ozone Annual Mean")
     t2 <- Sys.time()
     log_message(sprintf("Ozone plot rendered in %.2f sec", as.numeric(difftime(t2, t1, units="secs"))))
     p
-  }, res = 96)
+  }, res = 72)
   
   output$o3_mean <- renderText({
     store <- result_store(); req(store$o3)
@@ -748,12 +755,19 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$pm_plot <- renderPlot({
     t1 <- Sys.time()
     store <- result_store(); req(store$pm)
+    
+    id <- showNotification(
+      "Prediction completed. Preparing the map plot, please wait...",
+      type = "message", duration = NULL, closeButton = FALSE
+    )
+    on.exit(removeNotification(id), add = TRUE)
+    
     m <- mesh_with_vals(store$pm, models$pm)
     p <- plot_map(m, "Year", "Mean (µg/m³)", "PM₂.₅ Annual Mean")
     t2 <- Sys.time()
     log_message(sprintf("PM2.5 plot rendered in %.2f sec", as.numeric(difftime(t2, t1, units="secs"))))
     p
-  }, res = 96)
+  }, res = 72)
   
   output$pm_mean <- renderText({
     store <- result_store(); req(store$pm)
