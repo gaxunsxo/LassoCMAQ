@@ -15,8 +15,8 @@ plan(multisession)
 
 # -------------------- Constants --------------------
 region_names <- c(
-  "Seoul","Incheon","Busan","Daegu","Gwangju","Gyeonggi","Gangwon","Chung-Buk",
-  "Chung-Nam","Gyeong-Buk","Gyeong-Nam","Jeon-Buk","Jeon-Nam","Jeju","Daejeon","Ulsan","Sejong"
+  "Seoul","Incheon","Busan","Daegu","Gwangju","Gyeonggi","Gangwon","Chungbuk",
+  "Chungnam","Gyeongbuk","Gyeongnam","Jeonbuk","Jeonnam","Jeju","Daejeon","Ulsan","Sejong"
 )
 factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
 
@@ -219,6 +219,18 @@ td.rowhdr {
   box-shadow: none;          /* 파란 테두리 glow 제거 */
 }
 
+/* ===== Shiny notification custom ===== */
+.shiny-notification {
+ position: fixed;
+ top: 80px;
+ right: 100px;
+ font-size: 18px;
+ padding: 16px 22px;
+ border-radius: 8px;
+ box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+ z-index: 9999;
+}
+
 ")
 
 
@@ -226,7 +238,7 @@ td.rowhdr {
 ui <- page_fluid(
   theme = theme,
   useShinyjs(),
-  tags$head(tags$title("LassoCMAQ — Header-input Table (Compact)"), tags$style(custom_css)),
+  tags$head(tags$title("LassoCMAQ"), tags$style(custom_css)),
   
   # Sticky nav
   div(class = "sticky-top py-1",
@@ -289,7 +301,7 @@ ui <- page_fluid(
           card_body(
             h5("Citation", class="fw-bold mb-2"),
             tags$blockquote(
-              "D.-B. Lee et al., Least absolute shrinkage and selection operator with adaptive logit transformation to approximate CMAQ and generate effective control policies (in preparation)."
+              "D.-B. Lee et al., A fast CMAQ approximation method using LASSO with adaptive logit-transformed response (in preparation)."
             )
           )
         )
@@ -358,7 +370,8 @@ ui <- page_fluid(
       card(
         class = "section-block",
         h4("Ozone", class = "fw-bold mb-3"),
-        plotOutput("o3_plot", height = "680px") %>% withSpinner(),
+        plotOutput("o3_plot", height = "680px") %>% withSpinner() %>%
+          tagAppendAttributes(id = "o3_plot"),
         layout_columns(
           col_widths = c(6, 6),
           card(class = "card-tight", header = "Grid Average",
@@ -372,7 +385,8 @@ ui <- page_fluid(
       card(
         class = "section-block",
         h4("PM₂.₅", class = "fw-bold mb-3"),
-        plotOutput("pm_plot", height = "680px") %>% withSpinner(),
+        plotOutput("pm_plot", height = "680px") %>% withSpinner() %>%
+          tagAppendAttributes(id = "pm_plot"),
         layout_columns(
           col_widths = c(6, 6),
           card(class = "card-tight", header = "Grid Average",
@@ -383,6 +397,17 @@ ui <- page_fluid(
       )
     )
   ),
+  
+  tags$script(HTML("
+  $(document).on('shiny:value', function(event) {
+    if (event.target.id === 'o3_plot') {
+      Shiny.setInputValue('plot_done', 'o3', {priority: 'event'});
+    }
+    if (event.target.id === 'pm_plot') {
+      Shiny.setInputValue('plot_done', 'pm', {priority: 'event'});
+    }
+  });
+")),
   
   # Download
   div(id="download", class="section",
@@ -408,6 +433,7 @@ ui <- page_fluid(
 
 # -------------------- Server --------------------
 server <- function(input, output, session) {
+  notif_id <- reactiveVal(NULL)
   
   # Underlying numeric matrix (17 x 7), default 1
   vals <- reactiveVal({
@@ -686,6 +712,13 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     end_time <- Sys.time()
     log_message(sprintf("Total prediction time: %.2f sec", 
                         as.numeric(difftime(end_time, start_time, units="secs"))))
+    
+    # === 알림 표시 ===
+    id <- showNotification(
+      "Prediction completed. Preparing the map plot, please wait...",
+      type = "message", duration = NULL, closeButton = FALSE
+    )
+    notif_id(id)
   })
   
   # -------------------- Map helpers & plots --------------------
@@ -712,9 +745,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       labs(title = title_text) +
       theme_minimal() +
       theme(
-        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
-        legend.title = element_text(size = 12, face = "bold"),
-        legend.text  = element_text(size = 10)
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.text  = element_text(size = 12),
+        axis.text = element_text(size = 12)
       )
   }
   
@@ -722,19 +756,12 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$o3_plot <- renderPlot({
     t1 <- Sys.time()
     store <- result_store(); req(store$o3)
-    
-    id <- showNotification(
-      "Prediction completed. Preparing the map plot, please wait...",
-      type = "message", duration = NULL, closeButton = FALSE
-    )
-    on.exit(removeNotification(id), add = TRUE)
-    
     m <- mesh_with_vals(store$o3, models$o3)
     p <- plot_map(m, "Year", "Mean (ppb)", "Ozone Annual Mean")
     t2 <- Sys.time()
     log_message(sprintf("Ozone plot rendered in %.2f sec", as.numeric(difftime(t2, t1, units="secs"))))
     p
-  }, res = 72)
+  }, res = 60)
   
   output$o3_mean <- renderText({
     store <- result_store(); req(store$o3)
@@ -755,19 +782,12 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$pm_plot <- renderPlot({
     t1 <- Sys.time()
     store <- result_store(); req(store$pm)
-    
-    id <- showNotification(
-      "Prediction completed. Preparing the map plot, please wait...",
-      type = "message", duration = NULL, closeButton = FALSE
-    )
-    on.exit(removeNotification(id), add = TRUE)
-    
     m <- mesh_with_vals(store$pm, models$pm)
     p <- plot_map(m, "Year", "Mean (µg/m³)", "PM₂.₅ Annual Mean")
     t2 <- Sys.time()
     log_message(sprintf("PM2.5 plot rendered in %.2f sec", as.numeric(difftime(t2, t1, units="secs"))))
     p
-  }, res = 72)
+  }, res = 60)
   
   output$pm_mean <- renderText({
     store <- result_store(); req(store$pm)
@@ -782,6 +802,14 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     rng <- range(m$Year, na.rm = TRUE)
     paste0("Annual range across all cells: ",
            sprintf("%.1f – %.1f µg/m³", rng[1], rng[2]))
+  })
+  
+  observeEvent(input$plot_done, {
+    id <- notif_id()
+    if (!is.null(id)) {
+      removeNotification(id)
+      notif_id(NULL)
+    }
   })
   
   # -------------------- Downloads --------------------
