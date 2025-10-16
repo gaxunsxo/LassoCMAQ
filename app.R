@@ -9,6 +9,8 @@ suppressPackageStartupMessages({
   library(cowplot)
   library(future)
   library(promises)
+  library(waiter)
+  library(shinyWidgets)
 })
 
 plan(multisession)
@@ -354,6 +356,9 @@ ui <- page_fluid(
                                                choices = c("Ozone" = "o3", "PM₂.₅" = "pm25"),
                                                selected = c("o3","pm25")),
                             actionButton("btn_run","Run", class="btn btn-outline-primary btn-sm w-100"),
+                            br(), 
+                            progressBar(id = "pb", value = 0, total = 100, display_pct = TRUE, 
+                                        striped = TRUE, status = "primary")
                        )
                      )
       )
@@ -677,31 +682,66 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     cat(sprintf("[%s] %s\n", timestamp, msg), file = log_file, append = TRUE)
   }
   
+  # --- Run Prediction ---
   observeEvent(input$btn_run, {
+    req(input$pollutants)
     start_time <- Sys.time()
     log_message("Run button clicked: start prediction")
     
+    # 예상 시간 (사용자 제공 기준)
+    n_pollutants <- length(input$pollutants)
+    if (n_pollutants == 1) {
+      total_time <- 15
+      plot_time  <- 6
+    } else {
+      total_time <- 30
+      plot_time  <- 13
+    }
+    
+    # waiter overlay 시작
+    w <- Waiter$new(
+      id = c("o3_plot","pm_plot"),
+      html = tagList(
+        spin_fading_circles(),
+        h4("Running prediction, please wait...")
+      ),
+      color = "#ffffff"
+    )
+    w$show()
+    
+    # 초기화
+    updateProgressBar(session, "pb", value = 0, title = "Initializing...")
+    
+    # Step 1: Validation
+    updateProgressBar(session, "pb", value = 5, title = "Validating input...")
     m <- vals()
     if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); return() }
     if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
       showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); return()
     }
+    
     control_vec <- as.numeric(t(m))
     need_o3 <- "o3" %in% input$pollutants
     need_pm <- "pm25" %in% input$pollutants
     store <- list(o3=NULL, pm=NULL)
     
+    # Step 2: Ozone prediction
     if (need_o3) {
       t1 <- Sys.time()
       store$o3 <- predict_with_model(control_vec, models$o3)
+      updateProgressBar(session, "pb", value = ifelse(need_pm, 30, 60),
+                        title = "Running ozone prediction...")      
       t2 <- Sys.time()
       log_message(sprintf("Ozone prediction finished in %.2f sec", 
                           as.numeric(difftime(t2, t1, units="secs"))))
     }
     
+    # Step 3: PM2.5 prediction
     if (need_pm) {
       t1 <- Sys.time()
       store$pm <- predict_with_model(control_vec, models$pm)
+      updateProgressBar(session, "pb", value = ifelse(need_o3, 60, 60),
+                        title = "Running PM₂.₅ prediction...")
       t2 <- Sys.time()
       log_message(sprintf("PM2.5 prediction finished in %.2f sec", 
                           as.numeric(difftime(t2, t1, units="secs"))))
@@ -709,16 +749,19 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     
     result_store(store)
     
+    # Step 4: Plotting 준비
+    updateProgressBar(session, "pb", value = 90, title = "Preparing plots...")
+    
     end_time <- Sys.time()
     log_message(sprintf("Total prediction time: %.2f sec", 
                         as.numeric(difftime(end_time, start_time, units="secs"))))
-    
-    # === 알림 표시 ===
-    id <- showNotification(
-      "Prediction completed. Preparing the map plot, please wait...",
-      type = "message", duration = NULL, closeButton = FALSE
-    )
-    notif_id(id)
+  })
+  
+  # --- 플롯 완료 이벤트와 연동 ---
+  observeEvent(input$plot_done, {
+    updateProgressBar(session, "pb", value = 100, title = "Completed!")
+    Sys.sleep(0.5)   # 100% 상태 잠깐 유지
+    waiter_hide()
   })
   
   # -------------------- Map helpers & plots --------------------
@@ -802,14 +845,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     rng <- range(m$Year, na.rm = TRUE)
     paste0("Annual range across all cells: ",
            sprintf("%.1f – %.1f µg/m³", rng[1], rng[2]))
-  })
-  
-  observeEvent(input$plot_done, {
-    id <- notif_id()
-    if (!is.null(id)) {
-      removeNotification(id)
-      notif_id(NULL)
-    }
   })
   
   # -------------------- Downloads --------------------
