@@ -7,12 +7,16 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(sf)
   library(cowplot)
+  library(future)
+  library(promises)
 })
+
+plan(multisession)
 
 # -------------------- Constants --------------------
 region_names <- c(
   "Seoul","Incheon","Busan","Daegu","Gwangju","Gyeonggi","Gangwon","Chung-Buk",
-  "Chung-Nam","Gyeong-Buk","Gyeong-Nam","Jeon-Buk","Jeon-Nam","Jeju","Daejun","Ulsan","Sejong"
+  "Chung-Nam","Gyeong-Buk","Gyeong-Nam","Jeon-Buk","Jeon-Nam","Jeju","Daejeon","Ulsan","Sejong"
 )
 factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
 
@@ -22,11 +26,12 @@ mesh     <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp
 st_crs(asia_map) <- 4326
 st_crs(mesh)     <- 4326
 
-# O3
+# Ozone
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_ADAPT.RData")
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
+
 # PM2.5
 load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
 load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
@@ -43,83 +48,179 @@ theme <- bs_theme(
 
 custom_css <- HTML("
 /* ===== Base layout ===== */
-html { scroll-behavior: smooth; }
+html { 
+  scroll-behavior: smooth; 
+  scroll-padding-top: 20px;
+}
 body { padding: 0 24px 48px 24px; }
 .sticky-top { backdrop-filter: blur(6px); background: rgba(255,255,255,0.85); }
-.section { padding-top: 64px; margin-top: -64px; margin-bottom: 44px; }
+.section { 
+  scroll-margin-top: 80px;
+  padding-top: 0; 
+  margin-top: 0; 
+  margin-bottom: 20px;
+}
 .section-block { margin-top: 18px; }
 .hero { padding: 28px 0 8px; margin-bottom: 4px; }
 .muted { color:#6c757d; }
 .copyright { border-top: 1px solid #e9ecef; padding: 12px 0; margin-top: 24px; }
-
-/* Global card padding unified */
-.card {
-  --bs-card-spacer-y: 10px;
-  --bs-card-spacer-x: 12px;
-}
-.card .card-header, .card .card-body {
-  padding: var(--bs-card-spacer-y) var(--bs-card-spacer-x) !important;
-}
 .card-tight { box-shadow:none; border:1px solid #e9ecef; }
 
-/* ===== Run/Upload cards compact ===== */
-.card-compact .form-check-label, .card-compact label,
-.card-upload label { font-weight: 600; font-size: 0.95rem; }
+/* ===== Compact cards (right column) ===== */
+.card-compact .card-header { padding: 6px 10px; }
+.card-compact .card-body   { padding: 8px 10px; }
+.card-compact .form-check-label,
+.card-compact label { font-size: 0.92rem; }
+.card-compact .form-control-sm { height: 28px; padding: 2px 6px; }
 
-/* ===== Policy table: card scroll only ===== */
+/* ===== Table card: only DT scrolls, no cut at bottom ===== */
 .custom-table .card-body{
-  max-height: 720px;        /* 필요시 조절 */
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 12px 12px 14px;
+  min-height: 720px;     /* 필요 높이로 조절 (예: 320~420px) */
+  overflow-y: auto;      /* 세로 스크롤 ON */
+  overflow-x: hidden;    /* 가로 스크롤 숨김 */
+  padding: 20px;
 }
 
-/* DT wrapper sizing */
+/* Upload / Download, Select pollutants label 동일하게 bold + 크기 통일 */
+.card-upload label,
+.card-compact label {
+  font-weight: 600;      /* bold */
+  font-size: 0.95rem;    /* 카드 헤더랑 조화되게 */
+}
+
+/* When DT uses scrollY, ensure bottom is not clipped */
+.custom-table .dataTables_scrollBody{
+  overflow: visible !important;
+  max-height: none !important;
+  height: auto !important;
+}
+
+/* ===== DataTables layout & compact look ===== */
 .custom-table .dataTables_wrapper { width: 100%; }
 table.dataTable { table-layout: fixed; width: 100% !important; }
-table.dataTable td, table.dataTable th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.dataTable td,
+table.dataTable th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Remove DT chrome */
+/* DataTable 하단 여백 추가 */
+.custom-table .dataTables_wrapper table.dataTable tbody {
+  padding-bottom: 12px;   /* 마지막 행 밑으로 여유 */
+}
+
+/* 혹시 tbody에 padding이 안 먹히면 scrollBody에 여백 */
+.custom-table .dataTables_wrapper .dataTables_scrollBody,
+.custom-table .dataTables_wrapper {
+  padding-bottom: 12px;
+}
+
+/* Remove DT chrome (paging/search/info) */
 .dataTables_wrapper .dataTables_info,
 .dataTables_wrapper .dataTables_paginate,
 .dataTables_wrapper .dataTables_length,
 .dataTables_wrapper .dataTables_filter { display: none !important; }
 
-/* Header styles (compact) */
+/* ===== Header styles ===== */
 table.dataTable thead th {
   vertical-align: bottom;
-  background: #fdebd0;
-  border-color: #f3d2a2;
+  background: #E5F0FB;           /* label row: very light blue */
+  border-color: #d0dcec;
   font-weight: 700;
   padding: 3px 5px !important;
-  height: 26px; line-height: 1.15; font-size: 0.88rem;
+  height: 26px;
+  line-height: 1.15;
+  font-size: 0.88rem;
 }
+
 table.dataTable thead tr.header-inputs th {
-  background: #ffefd5;
+  background: #CCDFF7;           /* input row: slightly stronger blue */
   font-weight: 600;
   height: 30px;
 }
-.header-input, .row-input {
-  height: 22px !important; padding: 1px 4px !important; line-height: 1.1 !important; font-size: 0.86rem;
+
+/* Header / row inputs smaller */
+.header-input,
+.row-input {
+  height: 22px !important;
+  padding: 1px 4px !important;
+  line-height: 1.1 !important;
+  font-size: 0.86rem;
 }
 
-/* Body cells smaller */
-table.dataTable tbody td { padding: 3px 5px !important; height: 24px; font-size: 0.90rem; }
+/* ===== Body cells ===== */
+table.dataTable tbody td {
+  padding: 3px 5px !important;
+  height: 24px;
+  font-size: 0.90rem;
+  background-color: #ffffff;
+}
 
-/* First column (Region) */
+/* ===== First column (Region) as row header ===== */
 td.rowhdr {
-  background: #fffaf3; border-right: 2px solid #f0d9a8;
-  width: 180px !important; max-width: 180px !important;
+  background: #CCDFF7;            /* 가로 헤더 input row와 동일 색상 */
+  border-right: 2px solid #c9d7ec;
+  width: 180px !important;
+  max-width: 180px !important;
 }
-.rowhdr .rname { font-weight: 600; margin-bottom: 4px; display:block; }
-.rowhdr .row-input { width: 160px; }
+.rowhdr .rname {
+  font-weight: 600;
+  margin-bottom: 4px;
+  display:block;
+}
+.rowhdr .row-input {
+  width: 160px;
+}
 
-/* Bottom breathing room */
-.custom-table .dataTables_wrapper table.dataTable tbody { padding-bottom: 12px; }
 
-/* How-to small card width to content (optional) */
-.card-tight.auto-width { display: inline-block; width: auto !important; max-width: 100%; }
+/* 카드 폭을 내용에 맞게(auto) */
+.card-tight.auto-width {
+  display: inline-block;
+  width: auto !important;
+  max-width: 100%;    /* 반응형 안전 */
+}
+
+/* Force card title text to be visible */
+.card .card-title {
+  color: #212529 !important;    /* 본문색 강제 */
+  font-weight: 600 !important;  /* 두껍게 */
+  font-size: 1rem !important;   /* 크기 */
+  margin-bottom: .5rem !important;
+}
+
+/* 셀 내부를 flex 컨테이너로 만들어 input을 하단 배치 */
+.cell-wrapper {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;  /* 아래쪽으로 붙임 */
+  height: 100%;               /* td 전체 높이 차지 */
+}
+
+/* input 크기 조금 줄이기 (필요시) */
+.cell-wrapper .cell-input {
+  margin-top: auto;   /* 위 공간 밀어내고 아래 정렬 */
+}
+.cell-input {
+  height: 20px !important;
+  font-size: 0.8rem !important;
+  padding: 0 2px !important;
+  border: 1px solid #dee2e6;
+  border-radius: 3px;
+}
+/* 셀 입력창 배경 투명하게 */
+.cell-input,
+.row-input,
+.header-input {
+  background-color: transparent !important;
+}
+
+/* focus(선택) 되었을 때도 투명 유지 */
+.cell-input:focus,
+.row-input:focus,
+.header-input:focus {
+  background-color: transparent !important;
+  box-shadow: none;          /* 파란 테두리 glow 제거 */
+}
+
 ")
+
 
 # -------------------- UI --------------------
 ui <- page_fluid(
@@ -133,7 +234,6 @@ ui <- page_fluid(
                          card(class="p-1", style="border:1px; box-shadow:none; background:transparent;",
                               layout_column_wrap(width = 1, fill = TRUE,
                                                  div(class="d-flex align-items-center justify-content-between",
-                                                     div(tags$strong("LassoCMAQ Web Server • EP Project (2025)")),
                                                      div(class="d-flex gap-3",
                                                          tags$a(href="#home",     class="link-dark text-decoration-none", "Home"),
                                                          tags$a(href="#control",  class="link-dark text-decoration-none", "Control Policy"),
@@ -148,42 +248,74 @@ ui <- page_fluid(
   
   # Hero
   div(class="hero",
-      h2("LassoCMAQ"),
-      p(class="muted", "Emission-control based air pollution prediction web interface")
+      h2("LassoCMAQ", class = "fw-semibold mb-2"),
   ),
   
   # Home
-  div(id="home", class="section",
-      h3("Home"),
-      layout_columns(col_widths = c(6,6),
-                     card(header="What Is This", class="section-block",
-                          p("A DataTables-based policy table where header inputs fill whole rows/columns. No extra Row/Column Input cells or apply buttons.")
-                     ),
-                     card(header="How to Use (Demo)", class="section-block",
-                          tags$ol(
-                            tags$li("Type under a column header to fill that entire column."),
-                            tags$li("Type beside a region name to fill that entire row."),
-                            tags$li("Type in the top-left 'All' input to fill all data cells."),
-                            tags$li("Cells remain editable individually as well.")
-                          )
-                     )
+  div(id = "home", class = "section",
+      h3("Home", class = "fw-semibold mb-2"),
+      layout_columns(
+        col_widths = c(4,4,4),
+        
+        # What Is This
+        card(
+          class = "section-block",
+          card_body(
+            h5("What Is This", class="fw-bold mb-2"),
+            tags$ul(
+              tags$li("LassoCMAQ is a computationally efficient for CMAQ, developed using the least absolute shrinkage and selection operator (LASSO) together with an adaptive logit transformation of the response variable."),
+              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each, providing a full surrogate of CMAQ by computing concentrations for every cell at every hour, and enabling rapid what-if exploration without running CMAQ.")
+            )
+          )
+        ),
+        
+        # How to Use
+        card(
+          class = "section-block",
+          card_body(
+            h5("How to Use", class="fw-bold mb-2"),
+            tags$ul(
+              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Emission Source Category) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline scenario)."),
+              tags$li("2. Select pollutant(s) and click Run to approximate a CMAQ simulation for the selected control policy."),
+              tags$li("3. Inspect maps and summary metrics; adjust the table and rerun to compare alternative scenarios."),
+              tags$li("4. Download the control policy and the full CMAQ approximation results as needed.")
+            )
+          )
+        ),
+        
+        # Citation
+        card(
+          class = "section-block",
+          card_body(
+            h5("Citation", class="fw-bold mb-2"),
+            tags$blockquote(
+              "D.-B. Lee et al., Least absolute shrinkage and selection operator with adaptive logit transformation to approximate CMAQ and generate effective control policies (in preparation)."
+            )
+          )
+        )
       )
   ),
   
   # Control Policy
   div(id="control", class="section",
-      h3("Control Policy"),
-      # How-to (narrow)
-      card(header="How to Use", class="section-block card-tight auto-width",
-           tags$ul(
-             tags$li(HTML("<b>Each cell</b> represents the emission adjustment ratio for a specific Region and Sector")),
-             tags$li("Cells can be directly edited"),
-             tags$li("Update all cells at once"),
-             tags$li("Update a specific row or column at once"),
-             tags$li("Upload a control policy (sample file provided)"),
-             tags$li("Download the current control policy"),
-             tags$li("Click Run to start pollutant concentration prediction")
-           )
+      h3("Control Policy", class = "fw-semibold mb-2"),
+      
+      # How to Use
+      card(
+        class = "section-block card-tight auto-width",
+        card_body(
+          h5("How to Set a Control Policy", class = "fw-bold mb-2"),
+          tags$ul(
+            tags$li("Use the control policy matrix to define emission change ratios."),
+            tags$ul(
+              tags$li("Each cell = emission change ratio (Region × Source)."),
+              tags$li("Edit cells directly."),
+              tags$li("Update all cells at once."),
+              tags$li("Update a row or column at once."),
+              tags$li("Upload a control policy file.")
+            )
+          )
+        )
       ),
       layout_columns(col_widths = c(9,3),
                      # LEFT: Table
@@ -194,62 +326,84 @@ ui <- page_fluid(
                      ),
                      # RIGHT: Upload + Run
                      div(
-                       card(header="Upload / Download", class="section-block card-tight card-upload",
-                            fileInput("policy_upload","Upload Policy (CSV/RDS)", buttonLabel="Upload",
+                       card(header="Upload a control policy file (.csv)", class="section-block card-tight card-upload",
+                            tags$label("Upload a control policy file (.csv)", class = "form-label fw-semibold"),
+                            tags$small(
+                              "Example: ",
+                              tags$a(href = "sample_policy.csv",
+                                     "sample_policy.csv",
+                                     download = NA)
+                            ),
+                            fileInput("policy_upload", NULL, buttonLabel="Upload",
                                       accept = c(".csv", ".rds")),
-                            downloadButton("policy_download","Download Current Policy",
-                                           class = "btn btn-outline-secondary btn-sm")
                        ),
                        card(header="Run Prediction", class="section-block card-tight card-compact",
-                            checkboxGroupInput("pollutants","Select pollutants",
-                                               choices = c("Ozone (O₃)" = "o3", "PM2.5" = "pm25"),
+                            checkboxGroupInput("pollutants","Select pollutant(s)",
+                                               choices = c("Ozone" = "o3", "PM₂.₅" = "pm25"),
                                                selected = c("o3","pm25")),
-                            actionButton("btn_run","Run", class="btn btn-primary w-100"),
-                            p(class="muted mt-2 mb-0", "Runs LassoCMAQ prediction for selected pollutants.")
+                            actionButton("btn_run","Run", class="btn btn-outline-primary btn-sm w-100"),
                        )
                      )
       )
   ),
   
   # Results
-  div(id="outputs", class="section",
-      h3("Results"),
-      layout_columns(col_widths = c(12),
-                     card(header="Ozone", class="section-block",
-                          withSpinner(plotOutput("o3_plot", height = "680px"), type = 4),
-                          layout_columns(col_widths = c(3,9),
-                                         card(class="card-tight", header="Grid Average",
-                                              h4(textOutput("o3_mean"), class="display-6")),
-                                         card(class="card-tight", header="Summary",
-                                              textOutput("o3_summary"))
-                          )
-                     ),
-                     card(header="PM2.5", class="section-block",
-                          withSpinner(plotOutput("pm_plot", height = "680px"), type = 4),
-                          layout_columns(col_widths = c(3,9),
-                                         card(class="card-tight", header="Grid Average",
-                                              h4(textOutput("pm_mean"), class="display-6")),
-                                         card(class="card-tight", header="Summary",
-                                              textOutput("pm_summary"))
-                          )
-                     )
+  div(
+    id = "outputs", class = "section",
+    h3("Results", class = "fw-semibold mb-2"),
+    layout_columns(
+      col_widths = c(6, 6),
+      
+      # Ozone
+      card(
+        class = "section-block",
+        h4("Ozone", class = "fw-bold mb-3"),
+        plotOutput("o3_plot", height = "680px") %>% withSpinner(),
+        layout_columns(
+          col_widths = c(6, 6),
+          card(class = "card-tight", header = "Grid Average",
+               textOutput("o3_mean")),
+          card(class = "card-tight", header = "Summary",
+               textOutput("o3_summary"))
+        )
+      ),
+      
+      # PM₂.₅
+      card(
+        class = "section-block",
+        h4("PM₂.₅", class = "fw-bold mb-3"),
+        plotOutput("pm_plot", height = "680px") %>% withSpinner(),
+        layout_columns(
+          col_widths = c(6, 6),
+          card(class = "card-tight", header = "Grid Average",
+               textOutput("pm_mean")),
+          card(class = "card-tight", header = "Summary",
+               textOutput("pm_summary"))
+        )
       )
+    )
   ),
   
   # Download
   div(id="download", class="section",
-      h3("Download"),
+      h3("Download", class = "fw-semibold mb-2"),
       layout_columns(col_widths = c(6,6),
+                     card(class="card-tight", header="Control Policy",
+                          # download current control policy
+                          downloadButton("dl_policy",
+                                         "Download current control policy (.csv)", 
+                                         class="btn btn-outline-primary",
+                                         style="font-size:16px")),
                      card(class="card-tight", header="Result File",
-                          p("Download full prediction results as RDS."),
-                          downloadButton("dl_results","Download Results (RDS)", class="btn btn-outline-primary")),
-                     card(class="card-tight", header="Policy Template",
-                          p("Download a blank 17×7 CSV template."),
-                          downloadButton("dl_template","Download Template", class="btn btn-outline-secondary"))
+                          # download CMAQ approximation results
+                          downloadButton("dl_results",
+                                         "Download CMAQ approximation results (.rds)", 
+                                         class="btn btn-outline-primary",
+                                         style="font-size:16px"))
       )
   ),
   
-  div(class="copyright", "© Soongsil University Machine Learning Lab. All Rights Reserved.")
+  div(class="copyright", "© Soongsil University Machine Learning Lab All Rights Reserved.")
 )
 
 # -------------------- Server --------------------
@@ -266,45 +420,82 @@ server <- function(input, output, session) {
   to_numeric_matrix <- function(df) {
     num_df <- as.data.frame(lapply(df, function(x) suppressWarnings(as.numeric(x))), check.names = FALSE)
     m <- as.matrix(num_df)
-    colnames(m) <- colnames(df); rownames(m) <- rownames(df)
+    colnames(m) <- colnames(df)
+    rownames(m) <- rownames(df)
     m
   }
+  
   make_region_cell <- function(i) {
     as.character(
       tags$div(class="rowhdr",
                tags$span(class="rname", region_names[i]),
-               tags$input(type="number", step="0.1", placeholder="All",
-                          class="form-control form-control-sm row-input",
-                          `data-row`=i)
+               tags$input(
+                 type = "number", step = "0.1", placeholder = "All",
+                 class = "form-control form-control-sm row-input",
+                 `data-row` = i
+               )
       )
     )
   }
+  
+  make_cell_input <- function(i, j, value) {
+    as.character(
+      tags$div(
+        class = "cell-wrapper",
+        tags$input(
+          type = "number", step = "0.1",
+          value = format(value, trim = TRUE),
+          class = "form-control form-control-sm cell-input",
+          `data-row` = i, `data-col` = j
+        )
+      )
+    )
+  }
+  
   make_table_data <- function(m) {
     df <- as.data.frame(m, check.names = FALSE)
+    cell_cols <- lapply(seq_len(ncol(df)), function(j) {
+      vapply(seq_len(nrow(df)), function(i) make_cell_input(i, j, df[i, j]), character(1))
+    })
+    names(cell_cols) <- colnames(df)
+    
     data.frame(
       Region = vapply(seq_len(nrow(df)), make_region_cell, character(1)),
-      df,
+      cell_cols,
       check.names = FALSE, row.names = NULL
     )
   }
   
-  # custom 2-row header with inputs (All + per-column)
   sketch <- tags$table(
     class = "display",
     tags$thead(
-      tags$tr(tags$th("Region"), lapply(factor_names, function(fn) tags$th(fn))),
-      tags$tr(class = "header-inputs",
-              tags$th(tags$input(type="number", step="0.1", placeholder="All",
-                                 class="form-control form-control-sm header-input all-apply")),
-              lapply(seq_along(factor_names), function(j)
-                tags$th(tags$input(type="number", step="0.1", placeholder="All",
-                                   class="form-control form-control-sm header-input col-apply",
-                                   `data-col`=j)))
+      # row 1: labels
+      tags$tr(
+        tags$th("Region"),
+        lapply(factor_names, function(fn) tags$th(fn))
+      ),
+      # row 2: inputs
+      tags$tr(
+        class = "header-inputs",
+        tags$th(
+          tags$input(
+            type = "number", step = "0.1", placeholder = "All",
+            class = "form-control form-control-sm header-input all-apply"
+          )
+        ),
+        lapply(seq_along(factor_names), function(j) {
+          tags$th(
+            tags$input(
+              type = "number", step = "0.1", placeholder = "All",
+              class = "form-control form-control-sm header-input col-apply",
+              `data-col` = j
+            )
+          )
+        })
       )
     )
   )
   
-  # render DT
   output$policy_dt <- renderDT({
     datatable(
       make_table_data(vals()),
@@ -313,16 +504,22 @@ server <- function(input, output, session) {
       escape    = FALSE,
       selection = "none",
       options = list(
-        dom = 't', paging = FALSE, searching = FALSE, ordering = FALSE, info = FALSE,
-        autoWidth = FALSE, scrollX = FALSE,
+        dom = 't',
+        paging = FALSE,
+        searching = FALSE,
+        ordering = FALSE,
+        info = FALSE,
+        autoWidth = FALSE,
+        scrollX = FALSE,
         columnDefs = list(
-          list(targets = 0, width = "180px", className = "rowhdr"),
+          list(targets = 0, width = "200px", className = "rowhdr"),
           list(targets = 1:7, width = "80px")
         )
       ),
       callback = JS("
 function bindRowInputs(api){
   var tbody = $(api.table().body());
+  // row apply
   tbody.off('change', 'input.row-input');
   tbody.on('change', 'input.row-input', function(){
     var row = parseInt($(this).attr('data-row'), 10);
@@ -331,8 +528,20 @@ function bindRowInputs(api){
       Shiny.setInputValue('row_apply', {row: row, val: val, nonce: Math.random()});
     }
   });
+  // cell apply
+  tbody.off('change', 'input.cell-input');
+  tbody.on('change', 'input.cell-input', function(){
+    var row = parseInt($(this).attr('data-row'), 10);
+    var col = parseInt($(this).attr('data-col'), 10);
+    var val = parseFloat(this.value);
+    if(!isNaN(val)){
+      Shiny.setInputValue('cell_edit', {row: row, col: col, val: val, nonce: Math.random()});
+    }
+  });
 }
+
 var api = table;
+
 // Header inputs: per-column and ALL
 $(api.table().header())
   .on('change', 'input.col-apply', function(){
@@ -348,11 +557,22 @@ $(api.table().header())
       Shiny.setInputValue('all_apply', {val: val, nonce: Math.random()});
     }
   });
-// Rebind on draw (keep row inputs alive)
+
+// Rebind on draw
 bindRowInputs(api);
 api.on('draw.dt', function(){ bindRowInputs(api); });
 ")
     )
+  })
+  
+  # 개별 셀 이벤트 처리
+  observeEvent(input$cell_edit, {
+    info <- input$cell_edit
+    i <- as.integer(info$row); j <- as.integer(info$col); v <- as.numeric(info$val)
+    if (is.finite(v) && i >= 1 && j >= 1 && i <= nrow(vals()) && j <= ncol(vals())) {
+      m <- vals(); m[i, j] <- v; vals(m)
+      replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+    }
   })
   
   # apply events from header/row inputs
@@ -378,7 +598,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     }
   })
   
-  # upload/download (policy)
+  # upload policy
   observeEvent(input$policy_upload, {
     req(input$policy_upload)
     tryCatch({
@@ -396,18 +616,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       showModal(modalDialog(title = 'Upload Error', paste('Failed to apply policy:', e$message), easyClose = TRUE))
     })
   })
-  output$policy_download <- downloadHandler(
-    filename = function() paste0('policy_', format(Sys.time(), '%Y%m%d_%H%M%S'), '.csv'),
-    content = function(file) write.csv(as.data.frame(vals(), check.names = FALSE), file, row.names = TRUE)
-  )
-  output$dl_template <- downloadHandler(
-    filename = 'policy_template.csv',
-    content = function(file) {
-      tpl <- matrix(1.0, nrow = length(region_names), ncol = length(factor_names),
-                    dimnames = list(region_names, factor_names))
-      write.csv(as.data.frame(tpl, check.names = FALSE), file, row.names = TRUE)
-    }
-  )
   
   # -------------------- Prediction models --------------------
   models <- list(
@@ -435,7 +643,18 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   result_store <- reactiveVal(list(o3=NULL, pm=NULL))
   
+  # 로그 파일 경로
+  log_file <- "run.log"
+  
+  log_message <- function(msg) {
+    timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+    cat(sprintf("[%s] %s\n", timestamp, msg), file = log_file, append = TRUE)
+  }
+  
   observeEvent(input$btn_run, {
+    start_time <- Sys.time()
+    log_message("Run button clicked: start prediction")
+    
     m <- vals()
     if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); return() }
     if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
@@ -445,104 +664,130 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     need_o3 <- "o3" %in% input$pollutants
     need_pm <- "pm25" %in% input$pollutants
     store <- list(o3=NULL, pm=NULL)
-    if (need_o3) store$o3 <- predict_with_model(control_vec, models$o3)
-    if (need_pm) store$pm <- predict_with_model(control_vec, models$pm)
+    
+    if (need_o3) {
+      t1 <- Sys.time()
+      store$o3 <- predict_with_model(control_vec, models$o3)
+      t2 <- Sys.time()
+      log_message(sprintf("Ozone prediction finished in %.2f sec", 
+                          as.numeric(difftime(t2, t1, units="secs"))))
+    }
+    
+    if (need_pm) {
+      t1 <- Sys.time()
+      store$pm <- predict_with_model(control_vec, models$pm)
+      t2 <- Sys.time()
+      log_message(sprintf("PM2.5 prediction finished in %.2f sec", 
+                          as.numeric(difftime(t2, t1, units="secs"))))
+    }
+    
     result_store(store)
+    
+    end_time <- Sys.time()
+    log_message(sprintf("Total prediction time: %.2f sec", 
+                        as.numeric(difftime(end_time, start_time, units="secs"))))
   })
   
   # -------------------- Map helpers & plots --------------------
   month_means <- function(arr3) apply(arr3, 1, mean)  # [N,24,D] -> vector by grid
   mesh_with_vals <- function(preds, model) {
     m <- mesh
-    m$Jan  <- month_means(preds[, , model$MONTH_IDXS$Jan, drop = FALSE])
-    m$Apr  <- month_means(preds[, , model$MONTH_IDXS$Apr, drop = FALSE])
-    m$Jul  <- month_means(preds[, , model$MONTH_IDXS$Jul, drop = FALSE])
-    m$Oct  <- month_means(preds[, , model$MONTH_IDXS$Oct, drop = FALSE])
-    m$Year <- (m$Jan + m$Apr + m$Jul + m$Oct) / 4
+    m$Year <- month_means(preds)  # Annual only
     m
   }
   get_shared_fill_scale <- function(m, legend_title) {
-    all_vals <- c(m$Year, m$Jan, m$Apr, m$Jul, m$Oct)
-    vmin <- floor(min(all_vals, na.rm = TRUE) / 10) * 10
-    vmax <- ceiling(max(all_vals, na.rm = TRUE) / 10) * 10
+    vmin <- floor(min(m$Year, na.rm = TRUE) / 10) * 10
+    vmax <- ceiling(max(m$Year, na.rm = TRUE) / 10) * 10
     scale_fill_gradient(low = "white", high = "red",
                         limits = c(vmin, vmax),
                         breaks = pretty(c(vmin, vmax), n = 5),
                         name = legend_title)
   }
-  plot_map <- function(m, var_name, legend_title, title_text, show_legend=TRUE) {
-    p <- ggplot() +
-      geom_sf(data=asia_map, color="black", fill=NA) +
-      geom_sf(data=m, aes(fill=.data[[var_name]]), alpha=0.6, color="gray") +
-      coord_sf(xlim=c(124,131), ylim=c(32.5,39.5), expand=FALSE) +
+  plot_map <- function(m, var_name, legend_title, title_text) {
+    ggplot() +
+      geom_sf(data = asia_map, color = "black", fill = NA) +
+      geom_sf(data = m, aes(fill = .data[[var_name]]), alpha = 0.6, color = "gray") +
+      coord_sf(xlim = c(124,131), ylim = c(32.5,39.5), expand = FALSE) +
       get_shared_fill_scale(m, legend_title) +
-      labs(title=title_text) +
+      labs(title = title_text) +
       theme_minimal() +
       theme(
-        plot.title=element_text(hjust=0.5,face="bold",size=16),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
         legend.title = element_text(size = 12, face = "bold"),
         legend.text  = element_text(size = 10)
       )
-    if (!show_legend) p <- p + theme(legend.position="none")
-    p
   }
   
-  # O3
+  # Ozone Annual
   output$o3_plot <- renderPlot({
+    t1 <- Sys.time()
     store <- result_store(); req(store$o3)
     m <- mesh_with_vals(store$o3, models$o3)
-    cowplot::plot_grid(
-      plot_map(m,"Year","Mean (ppb)","Ozone — Annual",FALSE),
-      plot_map(m,"Jan","Mean (ppb)","January",FALSE),
-      plot_map(m,"Apr","Mean (ppb)","April",FALSE),
-      plot_map(m,"Jul","Mean (ppb)","July",FALSE),
-      plot_map(m,"Oct","Mean (ppb)","October",TRUE),
-      ncol=3
-    )
+    p <- plot_map(m, "Year", "Mean (ppb)", "Ozone Annual Mean")
+    t2 <- Sys.time()
+    log_message(sprintf("Ozone plot rendered in %.2f sec", as.numeric(difftime(t2, t1, units="secs"))))
+    p
   }, res = 96)
+  
   output$o3_mean <- renderText({
     store <- result_store(); req(store$o3)
     m <- mesh_with_vals(store$o3, models$o3)
-    sprintf("%.1f", mean(m$Year, na.rm = TRUE))
+    paste0("Annual average across all cells: ",
+           sprintf("%.1f ppb", mean(m$Year, na.rm = TRUE)))
   })
+  
   output$o3_summary <- renderText({
     store <- result_store(); req(store$o3)
     m <- mesh_with_vals(store$o3, models$o3)
     rng <- range(m$Year, na.rm = TRUE)
-    paste0("Annual range: ", sprintf("%.1f–%.1f ppb", rng[1], rng[2]),
-           " | Grid mean: ", sprintf("%.1f ppb", mean(m$Year, na.rm = TRUE)))
+    paste0("Annual range across all cells: ",
+           sprintf("%.1f – %.1f ppb", rng[1], rng[2]))
   })
   
-  # PM2.5
+  # PM2.5 Annual
   output$pm_plot <- renderPlot({
+    t1 <- Sys.time()
     store <- result_store(); req(store$pm)
     m <- mesh_with_vals(store$pm, models$pm)
-    cowplot::plot_grid(
-      plot_map(m,"Year","Mean (µg/m³)","PM2.5 — Annual",FALSE),
-      plot_map(m,"Jan","Mean (µg/m³)","January",FALSE),
-      plot_map(m,"Apr","Mean (µg/m³)","April",FALSE),
-      plot_map(m,"Jul","Mean (µg/m³)","July",FALSE),
-      plot_map(m,"Oct","Mean (µg/m³)","October",TRUE),
-      ncol=3
-    )
+    p <- plot_map(m, "Year", "Mean (µg/m³)", "PM₂.₅ Annual Mean")
+    t2 <- Sys.time()
+    log_message(sprintf("PM2.5 plot rendered in %.2f sec", as.numeric(difftime(t2, t1, units="secs"))))
+    p
   }, res = 96)
+  
   output$pm_mean <- renderText({
     store <- result_store(); req(store$pm)
     m <- mesh_with_vals(store$pm, models$pm)
-    sprintf("%.1f", mean(m$Year, na.rm = TRUE))
+    paste0("Annual average across all cells: ",
+           sprintf("%.1f µg/m³", mean(m$Year, na.rm = TRUE)))
   })
+  
   output$pm_summary <- renderText({
     store <- result_store(); req(store$pm)
     m <- mesh_with_vals(store$pm, models$pm)
     rng <- range(m$Year, na.rm = TRUE)
-    paste0("Annual range: ", sprintf("%.1f–%.1f µg/m³", rng[1], rng[2]),
-           " | Grid mean: ", sprintf("%.1f µg/m³", mean(m$Year, na.rm = TRUE)))
+    paste0("Annual range across all cells: ",
+           sprintf("%.1f – %.1f µg/m³", rng[1], rng[2]))
   })
   
   # -------------------- Downloads --------------------
+  # 1) Control policy (.csv)
+  output$dl_policy <- downloadHandler(
+    filename = function() paste0("control_policy_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) {
+      m  <- vals()                                   # 17x7 numeric matrix
+      df <- as.data.frame(m, check.names = FALSE)    # 열 이름 유지 (factor_names)
+      df_out <- cbind(Region = rownames(df), df)     # Region 컬럼 추가
+      utils::write.csv(df_out, file, row.names = FALSE, na = "")
+    }
+  )
+  
+  # 2) CMAQ approximation results (.rds)
   output$dl_results <- downloadHandler(
-    filename=function() paste0("prediction_",format(Sys.time(),"%Y%m%d_%H%M%S"),".rds"),
-    content=function(file) saveRDS(result_store(), file)
+    filename = function() paste0("prediction_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds"),
+    content  = function(file) {
+      saveRDS(result_store(), file)                  # list(o3=..., pm=...) 구조 그대로 저장
+    }
   )
 }
 
