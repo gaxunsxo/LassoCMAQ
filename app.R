@@ -20,7 +20,7 @@ factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Sol
 
 # ------------------ Units ------------------
 UNIT_O3_TEXT <- "ppb"
-UNIT_PM_TEXT <- "µg/m³"                   
+UNIT_PM_TEXT <- "µg/m³"
 UNIT_PM_HTML <- "&micro;g/m<sup>3</sup>"
 
 # -------------------- Load spatial & model objects --------------------
@@ -39,7 +39,6 @@ region_map_clean <- region_map %>%
 # -------------------- Compute CMAQ grid coordinates --------------------
 nx <- 67
 ny <- 82
-
 mesh$Row    <- (mesh$FID_1 %/% nx) + 1
 mesh$Column <- (mesh$FID_1 %%  nx) + 1
 
@@ -55,6 +54,7 @@ region_outline <- mesh %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   st_make_valid()
 
+# -------------------- Load model objects --------------------
 # Ozone
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
@@ -76,7 +76,6 @@ theme <- bs_theme(
 )
 
 custom_css <- HTML("
-/* ===== Base layout ===== */
 html { scroll-behavior: smooth; scroll-padding-top: 20px; }
 body { padding: 0 48px 48px 48px; }
 .sticky-top { backdrop-filter: blur(6px); background: rgba(255,255,255,0.85); }
@@ -86,14 +85,12 @@ body { padding: 0 48px 48px 48px; }
 .muted { color:#6c757d; }
 .copyright { border-top: 1px solid #e9ecef; padding: 12px 0; margin-top: 24px; }
 
-/* ===== Compact cards (right column) ===== */
 .card-compact .card-header { padding: 6px 10px; }
 .card-compact .card-body   { padding: 8px 10px; }
 .card-compact .form-check-label,
 .card-compact label { font-size: 0.92rem; }
 .card-compact .form-control-sm { height: 28px; padding: 2px 6px; }
 
-/* ===== Table card: DT scroll & spacing ===== */
 .custom-table .card-body{
   min-height: 720px;
   overflow-y: auto;
@@ -106,21 +103,15 @@ body { padding: 0 48px 48px 48px; }
   height: auto !important;
 }
 
-/* ===== DataTables compact look ===== */
 .custom-table .dataTables_wrapper { width: 100%; }
 table.dataTable { table-layout: fixed; width: 100% !important; }
 table.dataTable td, table.dataTable th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.custom-table .dataTables_wrapper table.dataTable tbody { padding-bottom: 12px; }
-.custom-table .dataTables_wrapper .dataTables_scrollBody,
-.custom-table .dataTables_wrapper { padding-bottom: 12px; }
 
-/* Hide default DT chrome */
 .dataTables_wrapper .dataTables_info,
 .dataTables_wrapper .dataTables_paginate,
 .dataTables_wrapper .dataTables_length,
 .dataTables_wrapper .dataTables_filter { display: none !important; }
 
-/* ===== Table headers ===== */
 table.dataTable thead th {
   vertical-align: bottom;
   background: #E5F0FB;
@@ -136,24 +127,18 @@ table.dataTable thead tr.header-inputs th {
   font-weight: 600;
   height: 30px;
 }
-
-/* Header / row inputs */
 .header-input, .row-input {
   height: 22px !important;
   padding: 1px 4px !important;
   line-height: 1.1 !important;
   font-size: 0.86rem;
 }
-
-/* ===== Body cells ===== */
 table.dataTable tbody td {
   padding: 3px 5px !important;
   height: 24px;
   font-size: 0.90rem;
   background-color: #ffffff;
 }
-
-/* ===== First column (Region) as row header ===== */
 td.rowhdr {
   background: #CCDFF7;
   border-right: 2px solid #c9d7ec;
@@ -163,18 +148,6 @@ td.rowhdr {
 .rowhdr .rname { font-weight: 600; margin-bottom: 4px; display:block; }
 .rowhdr .row-input { width: 160px; }
 
-/* Auto-width tight cards */
-.card-tight.auto-width { display: inline-block; width: auto !important; max-width: 100%; }
-
-/* Card title */
-.card .card-title {
-  color: #212529 !important;
-  font-weight: 600 !important;
-  font-size: 1rem !important;
-  margin-bottom: .5rem !important;
-}
-
-/* Cell input placement */
 .cell-wrapper { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
 .cell-wrapper .cell-input { margin-top: auto; }
 .cell-input {
@@ -184,15 +157,12 @@ td.rowhdr {
   border: 1px solid #dee2e6;
   border-radius: 3px;
 }
-
-/* Transparent inputs (normal & focus) */
 .cell-input, .row-input, .header-input { background-color: transparent !important; }
 .cell-input:focus, .row-input:focus, .header-input:focus {
   background-color: transparent !important;
   box-shadow: none;
 }
 
-/* ===== Shiny notification ===== */
 .shiny-notification {
  position: fixed;
  top: 80px;
@@ -204,7 +174,6 @@ td.rowhdr {
  z-index: 9999;
 }
 
-/* ===== Hover tooltip panel ===== */
 .hover-box {
   position: absolute;
   top: 12px;
@@ -230,7 +199,6 @@ ui <- page_fluid(
   useShinyjs(),
   tags$head(tags$title("LassoCMAQ"), tags$style(custom_css)),
   
-  # Sticky nav
   div(class = "sticky-top",
       layout_column_wrap(width = 1,
                          card(
@@ -252,10 +220,8 @@ ui <- page_fluid(
       )
   ),
   
-  # Hero
   div(class="hero", h2("LassoCMAQ", class = "fw-semibold mb-2")),
   
-  # Home
   div(id = "home", class = "section",
       h3("Home", class = "fw-semibold mb-2"),
       layout_columns(col_widths = c(4,4,4),
@@ -263,8 +229,8 @@ ui <- page_fluid(
                           card_body(
                             h5("What Is This", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using the least absolute shrinkage and selection operator (LASSO) together with an adaptive logit transformation of the response variable."),
-                              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each, providing a full surrogate of CMAQ by computing concentrations for every cell at every hour, and enabling rapid what-if exploration without running CMAQ.")
+                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using LASSO with an adaptive logit transformation."),
+                              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each.")
                             )
                           )
                      ),
@@ -272,10 +238,10 @@ ui <- page_fluid(
                           card_body(
                             h5("How to Use", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Emission Source Category) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline scenario)."),
-                              tags$li("2. Select pollutant(s) and click Run to approximate a CMAQ simulation for the selected control policy."),
-                              tags$li("3. Inspect maps and summary metrics; adjust the table and rerun to compare alternative scenarios."),
-                              tags$li("4. Download the control policy and the full CMAQ approximation results as needed.")
+                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Source)."),
+                              tags$li("2. Select pollutant(s) and click Run."),
+                              tags$li("3. Inspect maps and summary metrics; adjust and rerun."),
+                              tags$li("4. Download results as needed.")
                             )
                           )
                      ),
@@ -283,14 +249,13 @@ ui <- page_fluid(
                           card_body(
                             h5("Citation", class="fw-bold mb-2"),
                             tags$blockquote(
-                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for the Community Multiscale Air Quality Modeling System: application to ozone and PM2.5 policy support (submitted)",
+                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for CMAQ: application to ozone and PM2.5 policy support (submitted)"
                             )
                           )
                      )
       )
   ),
   
-  # Control Policy
   div(id="control", class="section",
       h3("Control Policy", class = "fw-semibold mb-2"),
       card(class = "section-block", style = "width:40%",
@@ -332,7 +297,6 @@ ui <- page_fluid(
       )
   ),
   
-  # Results
   div(id = "outputs", class = "section",
       h3("Results", tags$span("(Hover to inspect cells)",
                               class = "text-muted",
@@ -375,7 +339,6 @@ ui <- page_fluid(
       )
   ),
   
-  # Plot-done hook
   tags$script(HTML("
     $(document).on('shiny:value', function(event) {
       if (event.target.id === 'o3_plot') {
@@ -387,7 +350,6 @@ ui <- page_fluid(
     });
   ")),
   
-  # Download
   div(id="download", class="section",
       h3("Download", class = "fw-semibold mb-2"),
       layout_columns(col_widths = c(6,6),
@@ -408,7 +370,17 @@ ui <- page_fluid(
 # -------------------- Server --------------------
 server <- function(input, output, session) {
   
-  # Hover state
+  # -------------------- Logging (printf style) --------------------
+  log_file <- "run.log"
+  log_message <- function(fmt, ...) {
+    ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+    line <- sprintf(paste0("[%s] ", fmt, "\n"), ts, ...)
+    cat(line)                      # console
+    flush.console()
+    cat(line, file = log_file, append = TRUE)  # file
+  }
+  
+  # -------------------- Hover state --------------------
   o3_hover_info <- reactiveVal(NULL)
   pm_hover_info <- reactiveVal(NULL)
   
@@ -670,7 +642,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       
       if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
         showModal(modalDialog(title = "Upload Error", "All values must be between 0.5 and 1.5.", easyClose = TRUE))
-        return
+        return()
       }
       
       vals(m)
@@ -693,32 +665,94 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     )
   )
   
-  predict_with_model <- function(control_vec, model) {
-    linear_vec  <- as.vector(control_vec %*% model$WEIGHT)
+  # ---- 캐시: 이전 control_vec과 linear_vec 저장 ----
+  # key: "o3" / "pm"
+  linear_cache <- reactiveVal(list(
+    o3 = list(control = NULL, linear = NULL),
+    pm = list(control = NULL, linear = NULL)
+  ))
+  
+  # ---- Delta 기반 빠른 linear 계산 ----
+  # threshold: 바뀐 셀이 이 개수 이하일 때만 증분 업데이트 적용
+  DELTA_THRESHOLD <- 10L
+  
+  fast_linear_vec <- function(control_vec, model, key) {
+    cache <- linear_cache()[[key]]
+    
+    # 첫 실행(캐시 없음): 전체 계산
+    if (is.null(cache$control) || is.null(cache$linear)) {
+      t0 <- Sys.time()
+      linear_vec <- as.vector(matrix(control_vec, nrow = 1) %*% model$WEIGHT)
+      t1 <- Sys.time()
+      log_message("%s linear(full) computed: %.3f sec",
+                  key, as.numeric(difftime(t1, t0, units = "secs")))
+      
+      new_cache <- linear_cache()
+      new_cache[[key]] <- list(control = control_vec, linear = linear_vec)
+      linear_cache(new_cache)
+      return(linear_vec)
+    }
+    
+    delta <- control_vec - cache$control
+    idx <- which(delta != 0)
+    
+    # 바뀐 것이 없으면 그대로 반환
+    if (length(idx) == 0) {
+      log_message("%s linear reused (no change)", key)
+      return(cache$linear)
+    }
+    
+    # 바뀐 셀이 적을 때만 증분 업데이트
+    if (length(idx) <= DELTA_THRESHOLD) {
+      t0 <- Sys.time()
+      add <- as.vector(matrix(delta[idx], nrow = 1) %*% model$WEIGHT[idx, , drop = FALSE])
+      linear_vec <- cache$linear + add
+      t1 <- Sys.time()
+      log_message("%s linear(delta=%d) updated: %.3f sec",
+                  key, length(idx), as.numeric(difftime(t1, t0, units = "secs")))
+    } else {
+      t0 <- Sys.time()
+      linear_vec <- as.vector(matrix(control_vec, nrow = 1) %*% model$WEIGHT)
+      t1 <- Sys.time()
+      log_message("%s linear(full, delta=%d) computed: %.3f sec",
+                  key, length(idx), as.numeric(difftime(t1, t0, units = "secs")))
+    }
+    
+    new_cache <- linear_cache()
+    new_cache[[key]] <- list(control = control_vec, linear = linear_vec)
+    linear_cache(new_cache)
+    linear_vec
+  }
+  
+  month_means_fast <- function(arr) {
+    d <- dim(arr)
+    if (is.null(d)) stop("Pred has no dim.")
+    ncell <- d[1]
+    mat <- matrix(arr, nrow = ncell)
+    rowMeans(mat)
+  }
+  
+  predict_with_model_fast <- function(control_vec, model, key) {
+    linear_vec  <- fast_linear_vec(control_vec, model, key)
+    
+    t0 <- Sys.time()
     dims        <- dim(model$BIAS)
     linear_arr  <- array(linear_vec, dim = dims)
     linear_pred <- linear_arr + model$BIAS
     Pred        <- model$ADAPT / (1 + exp(-linear_pred))
     if (!is.null(model$CMAQ_UNIQUE)) Pred[model$CMAQ_UNIQUE] <- model$BIAS[model$CMAQ_UNIQUE]
-    Pred * model$SCALE
+    Pred <- Pred * model$SCALE
+    t1 <- Sys.time()
+    log_message("%s postprocess computed: %.3f sec",
+                key, as.numeric(difftime(t1, t0, units = "secs")))
+    Pred
   }
   
   result_store <- reactiveVal(list(o3=NULL, pm=NULL))
-  
   o3_sf <- reactiveVal(NULL)
   pm_sf <- reactiveVal(NULL)
   
-  # Logging
-  log_file <- "run.log"
-  log_message <- function(msg) {
-    timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-    cat(sprintf("[%s] %s\n", timestamp, msg), file = log_file, append = TRUE)
-  }
-  
-  # Map helpers
-  month_means <- function(arr3) apply(arr3, 1, mean)
-  
-  # Run prediction
+  # -------------------- Run prediction --------------------
   observeEvent(input$btn_run, {
     
     o3_hover_info(NULL)
@@ -728,7 +762,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     req(input$pollutants)
     
     start_time <- Sys.time()
-    log_message("Run button clicked: start prediction")
+    log_message("Run clicked: start prediction")
     
     w$show()
     updateProgressBar(session, "pb", value = 0,  title = "Initializing...")
@@ -747,32 +781,39 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     store <- list(o3=NULL, pm=NULL)
     
     if (need_o3) {
-      t1 <- Sys.time()
       updateProgressBar(session, "pb", value = 20, title = "Running Ozone prediction...")
-      store$o3 <- predict_with_model(control_vec, models$o3)
+      t1 <- Sys.time()
+      store$o3 <- predict_with_model_fast(control_vec, models$o3, "o3")
+      t2 <- Sys.time()
+      log_message("Ozone total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+      
+      t3 <- Sys.time()
+      m_o3 <- mesh
+      m_o3$Year <- month_means_fast(store$o3)
+      o3_sf(m_o3)
+      t4 <- Sys.time()
+      log_message("Ozone mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
       
       updateProgressBar(session, "pb", value = if (need_pm) 45 else 80, title = "Ozone prediction finished")
-      t2 <- Sys.time()
-      log_message(sprintf("Ozone prediction finished in %.2f sec", as.numeric(difftime(t2, t1, units = "secs"))))
-      
-      m_o3 <- mesh
-      m_o3$Year <- month_means(store$o3)
-      o3_sf(m_o3)
     } else {
       o3_sf(NULL)
     }
     
     if (need_pm) {
-      t1 <- Sys.time()
       updateProgressBar(session, "pb", value = if (need_o3) 50 else 20, title = "Running PM₂.₅ prediction...")
-      store$pm <- predict_with_model(control_vec, models$pm)
-      updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = "PM₂.₅ prediction finished")
+      t1 <- Sys.time()
+      store$pm <- predict_with_model_fast(control_vec, models$pm, "pm")
       t2 <- Sys.time()
-      log_message(sprintf("PM₂.₅ prediction finished in %.2f sec", as.numeric(difftime(t2, t1, units = "secs"))))
+      log_message("PM₂.₅ total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
       
+      t3 <- Sys.time()
       m_pm <- mesh
-      m_pm$Year <- month_means(store$pm)
+      m_pm$Year <- month_means_fast(store$pm)
       pm_sf(m_pm)
+      t4 <- Sys.time()
+      log_message("PM₂.₅ mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
+      
+      updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = "PM₂.₅ prediction finished")
     } else {
       pm_sf(NULL)
     }
@@ -781,11 +822,16 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     updateProgressBar(session, "pb", value = 90, title = "Preparing plots...")
     
     end_time <- Sys.time()
-    log_message(sprintf("Total prediction time: %.2f sec", as.numeric(difftime(end_time, start_time, units = "secs"))))
+    log_message("Total run time: %.3f sec", as.numeric(difftime(end_time, start_time, units = "secs")))
   })
   
   # Plot-done -> complete progress & hide overlay
   observeEvent(input$plot_done, {
+    log_message(
+      "Plot finished rendering in browser: %s",
+      input$plot_done
+    )
+    
     updateProgressBar(session, "pb", value = 100, title = "Completed!")
     Sys.sleep(0.5)
     w$hide()
@@ -802,6 +848,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       name = legend_title
     )
   }
+  
   plot_map <- function(m, var_name, legend_title, title_text) {
     ggplot() +
       geom_sf(data = asia_map, color = "black", fill = NA) +
@@ -833,8 +880,8 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     plot_map(
       m,
       "Year",
-      paste0("PM₂.₅ (", UNIT_PM_TEXT, ")"),
-      "PM₂.₅ Annual Mean"
+      paste0(UNIT_PM_HTML, "(", UNIT_PM_TEXT, ")"),
+      UNIT_PM_HTML, "Annual Mean"
     )
   }, res = 60)
   
@@ -940,7 +987,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     
     tags$div(
       class = "hover-box",
-      tags$div(class = "title", "Grid Cell Info (PM₂.₅)"),
+      tags$div(class = "title", "Grid Cell Info (", UNIT_PM_HTML, ")"),
       HTML(sprintf(
         "<b>Region:</b> %s<br>
          <b>Longitude:</b> %.2f<br>
