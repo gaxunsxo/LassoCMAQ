@@ -4,11 +4,11 @@ suppressPackageStartupMessages({
   library(DT)
   library(shinycssloaders)
   library(shinyjs)
-  library(ggplot2)
   library(sf)
   library(dplyr)
   library(waiter)
   library(shinyWidgets)
+  library(leaflet)
 })
 
 # -------------------- Constants --------------------
@@ -18,16 +18,28 @@ region_names <- c(
 )
 factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
 
-# ------------------ Units ------------------
-UNIT_O3_TEXT <- "ppb"
-UNIT_PM_TEXT <- "µg/m³"                   
+# ------------------ Units & Labels ------------------
+# O3
+UNIT_O3_TEXT  <- "ppb"
+O3_LABEL_TEXT <- "Ozone"
+
+# PM2.5
+PM25_LABEL_TEXT <- "PM<sub>2.5</sub>"
+PM25_LABEL_HTML <- "PM<sub>2.5</sub>"
+
+UNIT_PM_TEXT <- "µg/m³"
 UNIT_PM_HTML <- "&micro;g/m<sup>3</sup>"
+
+PM25_FULL_TEXT <- paste0(PM25_LABEL_TEXT, " (", UNIT_PM_TEXT, ")")
+PM25_FULL_HTML <- paste0(PM25_LABEL_HTML, " (", UNIT_PM_HTML, ")")
 
 # -------------------- Load spatial & model objects --------------------
 asia_map <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Asia_county_map.shp", quiet = TRUE)
 mesh     <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp", quiet = TRUE)
 st_crs(asia_map) <- 4326
-st_crs(mesh)     <- 4326
+st_crs(mesh) <- 4326
+asia_map <- st_make_valid(asia_map)
+mesh     <- st_make_valid(mesh)
 
 # -------------------- Load region map --------------------
 region_map <- read.csv("/home/geseo/LassoCMAQ_Data/Grid-based Regional Allocation Ratio for 17 Municipalities_UPDATED.csv")
@@ -39,14 +51,14 @@ region_map_clean <- region_map %>%
 # -------------------- Compute CMAQ grid coordinates --------------------
 nx <- 67
 ny <- 82
-
 mesh$Row    <- (mesh$FID_1 %/% nx) + 1
 mesh$Column <- (mesh$FID_1 %%  nx) + 1
 
 # -------------------- LEFT JOIN --------------------
 mesh <- mesh %>%
   left_join(region_map_clean[, c("Column","Row","Region_Name")],
-            by = c("Column","Row"))
+            by = c("Column","Row")) %>%
+  st_make_valid()
 
 # -------------------- Region outline (dissolve) --------------------
 region_outline <- mesh %>%
@@ -55,6 +67,7 @@ region_outline <- mesh %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   st_make_valid()
 
+# -------------------- Load model objects --------------------
 # Ozone
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
 load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
@@ -64,7 +77,6 @@ load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
 # PM2.5
 load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
 load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
-load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ.RData")
 load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_BIAS.RData")
 load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_ADAPT.RData")
 
@@ -76,7 +88,6 @@ theme <- bs_theme(
 )
 
 custom_css <- HTML("
-/* ===== Base layout ===== */
 html { scroll-behavior: smooth; scroll-padding-top: 20px; }
 body { padding: 0 48px 48px 48px; }
 .sticky-top { backdrop-filter: blur(6px); background: rgba(255,255,255,0.85); }
@@ -86,14 +97,12 @@ body { padding: 0 48px 48px 48px; }
 .muted { color:#6c757d; }
 .copyright { border-top: 1px solid #e9ecef; padding: 12px 0; margin-top: 24px; }
 
-/* ===== Compact cards (right column) ===== */
 .card-compact .card-header { padding: 6px 10px; }
 .card-compact .card-body   { padding: 8px 10px; }
 .card-compact .form-check-label,
 .card-compact label { font-size: 0.92rem; }
 .card-compact .form-control-sm { height: 28px; padding: 2px 6px; }
 
-/* ===== Table card: DT scroll & spacing ===== */
 .custom-table .card-body{
   min-height: 720px;
   overflow-y: auto;
@@ -106,21 +115,15 @@ body { padding: 0 48px 48px 48px; }
   height: auto !important;
 }
 
-/* ===== DataTables compact look ===== */
 .custom-table .dataTables_wrapper { width: 100%; }
 table.dataTable { table-layout: fixed; width: 100% !important; }
 table.dataTable td, table.dataTable th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.custom-table .dataTables_wrapper table.dataTable tbody { padding-bottom: 12px; }
-.custom-table .dataTables_wrapper .dataTables_scrollBody,
-.custom-table .dataTables_wrapper { padding-bottom: 12px; }
 
-/* Hide default DT chrome */
 .dataTables_wrapper .dataTables_info,
 .dataTables_wrapper .dataTables_paginate,
 .dataTables_wrapper .dataTables_length,
 .dataTables_wrapper .dataTables_filter { display: none !important; }
 
-/* ===== Table headers ===== */
 table.dataTable thead th {
   vertical-align: bottom;
   background: #E5F0FB;
@@ -136,24 +139,18 @@ table.dataTable thead tr.header-inputs th {
   font-weight: 600;
   height: 30px;
 }
-
-/* Header / row inputs */
 .header-input, .row-input {
   height: 22px !important;
   padding: 1px 4px !important;
   line-height: 1.1 !important;
   font-size: 0.86rem;
 }
-
-/* ===== Body cells ===== */
 table.dataTable tbody td {
   padding: 3px 5px !important;
   height: 24px;
   font-size: 0.90rem;
   background-color: #ffffff;
 }
-
-/* ===== First column (Region) as row header ===== */
 td.rowhdr {
   background: #CCDFF7;
   border-right: 2px solid #c9d7ec;
@@ -163,18 +160,6 @@ td.rowhdr {
 .rowhdr .rname { font-weight: 600; margin-bottom: 4px; display:block; }
 .rowhdr .row-input { width: 160px; }
 
-/* Auto-width tight cards */
-.card-tight.auto-width { display: inline-block; width: auto !important; max-width: 100%; }
-
-/* Card title */
-.card .card-title {
-  color: #212529 !important;
-  font-weight: 600 !important;
-  font-size: 1rem !important;
-  margin-bottom: .5rem !important;
-}
-
-/* Cell input placement */
 .cell-wrapper { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
 .cell-wrapper .cell-input { margin-top: auto; }
 .cell-input {
@@ -184,15 +169,12 @@ td.rowhdr {
   border: 1px solid #dee2e6;
   border-radius: 3px;
 }
-
-/* Transparent inputs (normal & focus) */
 .cell-input, .row-input, .header-input { background-color: transparent !important; }
 .cell-input:focus, .row-input:focus, .header-input:focus {
   background-color: transparent !important;
   box-shadow: none;
 }
 
-/* ===== Shiny notification ===== */
 .shiny-notification {
  position: fixed;
  top: 80px;
@@ -203,34 +185,40 @@ td.rowhdr {
  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
  z-index: 9999;
 }
-
-/* ===== Hover tooltip panel ===== */
-.hover-box {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 999;
-  background: rgba(255,255,255,0.92);
-  border: 1px solid #dee2e6;
-  border-radius: 10px;
-  padding: 10px 12px;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.15);
-  min-width: 220px;
-  max-width: 340px;
-  font-size: 0.92rem;
-  line-height: 1.35;
-}
-.hover-box .title { font-weight: 700; margin-bottom: 6px; }
-.hover-box .muted { color:#6c757d; font-size: 0.85rem; }
 ")
 
 # -------------------- UI --------------------
 ui <- page_fluid(
   theme = theme,
   useShinyjs(),
-  tags$head(tags$title("LassoCMAQ"), tags$style(custom_css)),
+  tags$head(
+    tags$title("LassoCMAQ"),
+    tags$style(custom_css),
+    tags$script(HTML("
+      window.__leafletRenderStart = {};
+      Shiny.addCustomMessageHandler('markRenderStart', function(msg) {
+        window.__leafletRenderStart[msg.map_id] = performance.now();
+      });
+      Shiny.addCustomMessageHandler('probeLeafletRender', function(msg) {
+        var mapId = msg.map_id;
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() {
+            var t0 = window.__leafletRenderStart[mapId];
+            if (t0) {
+              var dt = (performance.now() - t0) / 1000;
+              console.log('[Leaflet browser render] ' + mapId + ': ' + dt.toFixed(3) + ' sec');
+              Shiny.setInputValue('leaflet_render_done', {
+                map_id: mapId,
+                elapsed: dt,
+                nonce: Math.random()
+              }, {priority: 'event'});
+            }
+          });
+        });
+      });
+    "))
+  ),
   
-  # Sticky nav
   div(class = "sticky-top",
       layout_column_wrap(width = 1,
                          card(
@@ -252,10 +240,8 @@ ui <- page_fluid(
       )
   ),
   
-  # Hero
   div(class="hero", h2("LassoCMAQ", class = "fw-semibold mb-2")),
   
-  # Home
   div(id = "home", class = "section",
       h3("Home", class = "fw-semibold mb-2"),
       layout_columns(col_widths = c(4,4,4),
@@ -263,8 +249,8 @@ ui <- page_fluid(
                           card_body(
                             h5("What Is This", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using the least absolute shrinkage and selection operator (LASSO) together with an adaptive logit transformation of the response variable."),
-                              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each, providing a full surrogate of CMAQ by computing concentrations for every cell at every hour, and enabling rapid what-if exploration without running CMAQ.")
+                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using LASSO with an adaptive logit transformation."),
+                              tags$li("It estimates Ozone or PM2.5 concentrations from regional emission-control scenarios in about 10 seconds each.")
                             )
                           )
                      ),
@@ -272,10 +258,10 @@ ui <- page_fluid(
                           card_body(
                             h5("How to Use", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Emission Source Category) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline scenario)."),
-                              tags$li("2. Select pollutant(s) and click Run to approximate a CMAQ simulation for the selected control policy."),
-                              tags$li("3. Inspect maps and summary metrics; adjust the table and rerun to compare alternative scenarios."),
-                              tags$li("4. Download the control policy and the full CMAQ approximation results as needed.")
+                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Source)."),
+                              tags$li("2. Select pollutant(s) and click Run."),
+                              tags$li("3. Inspect maps and summary metrics; adjust and rerun."),
+                              tags$li("4. Download results as needed.")
                             )
                           )
                      ),
@@ -283,14 +269,13 @@ ui <- page_fluid(
                           card_body(
                             h5("Citation", class="fw-bold mb-2"),
                             tags$blockquote(
-                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for the Community Multiscale Air Quality Modeling System: application to ozone and PM2.5 policy support (submitted)",
+                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for CMAQ: application to ozone and PM2.5 policy support (submitted)"
                             )
                           )
                      )
       )
   ),
   
-  # Control Policy
   div(id="control", class="section",
       h3("Control Policy", class = "fw-semibold mb-2"),
       card(class = "section-block", style = "width:40%",
@@ -324,7 +309,7 @@ ui <- page_fluid(
                        ),
                        card(header="Run Prediction", class="section-block card-compact",
                             checkboxGroupInput("pollutants","Select pollutant(s)",
-                                               choices = c("Ozone" = "o3", "PM₂.₅" = "pm25"),
+                                               choices = c("Ozone" = "o3", "PM2.5" = "pm25"),
                                                selected = c("o3","pm25")),
                             actionButton("btn_run","Run", class="btn btn-outline-primary btn-sm w-100")
                        )
@@ -332,41 +317,23 @@ ui <- page_fluid(
       )
   ),
   
-  # Results
   div(id = "outputs", class = "section",
-      h3("Results", tags$span("(Hover to inspect cells)",
-                              class = "text-muted",
-                              style = "font-size: 0.85rem; font-weight: normal;")
-         ,class = "fw-semibold mb-2"),
+      h3("Results", class = "fw-semibold mb-2"),
       div(style = "width:60%; margin-left:0; margin-top: 15px",
           progressBar(id = "pb", value = 0, total = 100, display_pct = TRUE, striped = TRUE, status = "primary")
       ),
       layout_columns(col_widths = c(6, 6),
                      card(class = "section-block",
                           h4("Ozone", class = "fw-bold mb-3"),
-                          div(style = "position: relative;",
-                              plotOutput(
-                                "o3_plot",
-                                height = "680px",
-                                hover = hoverOpts("o3_hover", delay = 400, delayType = "debounce")
-                              ) %>% withSpinner() %>% tagAppendAttributes(id = "o3_plot"),
-                              uiOutput("o3_hover_box")
-                          ),
+                          leafletOutput("o3_plot", height = "680px") %>% withSpinner(),
                           layout_columns(col_widths = c(6, 6),
                                          card(header = "Grid Average", textOutput("o3_mean")),
                                          card(header = "Summary", textOutput("o3_summary"))
                           )
                      ),
                      card(class = "section-block",
-                          h4("PM₂.₅", class = "fw-bold mb-3"),
-                          div(style = "position: relative;",
-                              plotOutput(
-                                "pm_plot",
-                                height = "680px",
-                                hover = hoverOpts("pm_hover", delay = 400, delayType = "debounce")
-                              ) %>% withSpinner() %>% tagAppendAttributes(id = "pm_plot"),
-                              uiOutput("pm_hover_box")
-                          ),
+                          h4("PM2.5", class = "fw-bold mb-3"),
+                          leafletOutput("pm_plot", height = "680px") %>% withSpinner(),
                           layout_columns(col_widths = c(6, 6),
                                          card(header = "Grid Average", textOutput("pm_mean")),
                                          card(header = "Summary", textOutput("pm_summary"))
@@ -375,19 +342,6 @@ ui <- page_fluid(
       )
   ),
   
-  # Plot-done hook
-  tags$script(HTML("
-    $(document).on('shiny:value', function(event) {
-      if (event.target.id === 'o3_plot') {
-        Shiny.setInputValue('plot_done', 'o3', {priority: 'event'});
-      }
-      if (event.target.id === 'pm_plot') {
-        Shiny.setInputValue('plot_done', 'pm', {priority: 'event'});
-      }
-    });
-  ")),
-  
-  # Download
   div(id="download", class="section",
       h3("Download", class = "fw-semibold mb-2"),
       layout_columns(col_widths = c(6,6),
@@ -408,9 +362,15 @@ ui <- page_fluid(
 # -------------------- Server --------------------
 server <- function(input, output, session) {
   
-  # Hover state
-  o3_hover_info <- reactiveVal(NULL)
-  pm_hover_info <- reactiveVal(NULL)
+  # -------------------- Logging --------------------
+  log_file <- "run.log"
+  log_message <- function(fmt, ...) {
+    ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+    line <- sprintf(paste0("[%s] ", fmt, "\n"), ts, ...)
+    cat(line)
+    flush.console()
+    cat(line, file = log_file, append = TRUE)
+  }
   
   # Loading overlay
   w <- Waiter$new(
@@ -670,7 +630,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       
       if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
         showModal(modalDialog(title = "Upload Error", "All values must be between 0.5 and 1.5.", easyClose = TRUE))
-        return
+        return()
       }
       
       vals(m)
@@ -693,51 +653,206 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     )
   )
   
-  predict_with_model <- function(control_vec, model) {
-    linear_vec  <- as.vector(control_vec %*% model$WEIGHT)
+  linear_cache <- reactiveVal(list(
+    o3 = list(control = NULL, linear = NULL),
+    pm = list(control = NULL, linear = NULL)
+  ))
+  
+  DELTA_THRESHOLD <- 10L
+  
+  fast_linear_vec <- function(control_vec, model, key) {
+    cache <- linear_cache()[[key]]
+    
+    if (is.null(cache$control) || is.null(cache$linear)) {
+      t0 <- Sys.time()
+      linear_vec <- as.vector(matrix(control_vec, nrow = 1) %*% model$WEIGHT)
+      t1 <- Sys.time()
+      log_message("%s linear(full) computed: %.3f sec", key, as.numeric(difftime(t1, t0, units = "secs")))
+      
+      new_cache <- linear_cache()
+      new_cache[[key]] <- list(control = control_vec, linear = linear_vec)
+      linear_cache(new_cache)
+      return(linear_vec)
+    }
+    
+    delta <- control_vec - cache$control
+    idx <- which(delta != 0)
+    
+    if (length(idx) == 0) {
+      log_message("%s linear reused (no change)", key)
+      return(cache$linear)
+    }
+    
+    if (length(idx) <= DELTA_THRESHOLD) {
+      t0 <- Sys.time()
+      add <- as.vector(matrix(delta[idx], nrow = 1) %*% model$WEIGHT[idx, , drop = FALSE])
+      linear_vec <- cache$linear + add
+      t1 <- Sys.time()
+      log_message("%s linear(delta=%d) updated: %.3f sec", key, length(idx), as.numeric(difftime(t1, t0, units = "secs")))
+    } else {
+      t0 <- Sys.time()
+      linear_vec <- as.vector(matrix(control_vec, nrow = 1) %*% model$WEIGHT)
+      t1 <- Sys.time()
+      log_message("%s linear(full, delta=%d) computed: %.3f sec", key, length(idx), as.numeric(difftime(t1, t0, units = "secs")))
+    }
+    
+    new_cache <- linear_cache()
+    new_cache[[key]] <- list(control = control_vec, linear = linear_vec)
+    linear_cache(new_cache)
+    linear_vec
+  }
+  
+  month_means_fast <- function(arr) {
+    d <- dim(arr)
+    if (is.null(d)) stop("Pred has no dim.")
+    ncell <- d[1]
+    mat <- matrix(arr, nrow = ncell)
+    rowMeans(mat)
+  }
+  
+  predict_with_model_fast <- function(control_vec, model, key) {
+    linear_vec  <- fast_linear_vec(control_vec, model, key)
+    
+    t0 <- Sys.time()
     dims        <- dim(model$BIAS)
     linear_arr  <- array(linear_vec, dim = dims)
     linear_pred <- linear_arr + model$BIAS
     Pred        <- model$ADAPT / (1 + exp(-linear_pred))
     if (!is.null(model$CMAQ_UNIQUE)) Pred[model$CMAQ_UNIQUE] <- model$BIAS[model$CMAQ_UNIQUE]
-    Pred * model$SCALE
+    Pred <- Pred * model$SCALE
+    t1 <- Sys.time()
+    log_message("%s postprocess computed: %.3f sec", key, as.numeric(difftime(t1, t0, units = "secs")))
+    Pred
   }
   
   result_store <- reactiveVal(list(o3=NULL, pm=NULL))
-  
   o3_sf <- reactiveVal(NULL)
   pm_sf <- reactiveVal(NULL)
   
-  # Logging
-  log_file <- "run.log"
-  log_message <- function(msg) {
-    timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-    cat(sprintf("[%s] %s\n", timestamp, msg), file = log_file, append = TRUE)
+  # -------------------- Run prediction --------------------
+  init_leaflet <- function() {
+    leaflet(mesh, options = leafletOptions(preferCanvas = TRUE)) %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      setView(lng = 127.8, lat = 36.2, zoom = 6) %>%
+      
+      addPolygons(
+        layerId = ~FID_1,
+        fillColor = "white",
+        fillOpacity = 0.65,
+        color = NA,
+        stroke = FALSE,
+        group = "mesh"
+      ) %>%
+      
+      addPolygons(
+        data = asia_map,
+        fill = FALSE,
+        color = "#444444",
+        weight = 1,
+        opacity = 0.9,
+        group = "boundary"
+      )
   }
   
-  # Map helpers
-  month_means <- function(arr3) apply(arr3, 1, mean)
+  reset_leaflet <- function(map_id) {
+    leafletProxy(map_id) %>%
+      clearGroup("mesh") %>%
+      clearControls() %>%
+      setView(lng = 127.8, lat = 36.2, zoom = 6)
+  }
   
-  # Run prediction
-  observeEvent(input$btn_run, {
+  blend_white_red <- function(x, alpha = 0.6) {
+    rgb(1, 1 - alpha * x, 1 - alpha * x)
+  }
+  
+  make_red_pal <- function(x) {
+    vmin <- floor(min(x, na.rm = TRUE) / 10) * 10
+    vmax <- ceiling(max(x, na.rm = TRUE) / 10) * 10
     
-    o3_hover_info(NULL)
-    pm_hover_info(NULL)
+    pal <- leaflet::colorNumeric(
+      palette = "Reds",
+      domain = c(vmin, vmax),
+      na.color = "transparent"
+    )
+    
+    list(pal = pal, vmin = vmin, vmax = vmax)
+  }
+  
+  update_leaflet_map <- function(map_id, m, legend_title_html) {
+    
+    if (is.null(m) || nrow(m) == 0) {
+      reset_leaflet(map_id)
+      return(invisible(NULL))
+    }
+    
+    pal_info <- make_red_pal(m$Year)
+    pal  <- pal_info$pal
+    vmin <- pal_info$vmin
+    vmax <- pal_info$vmax
+    
+    leafletProxy(map_id) %>%
+      clearGroup("mesh") %>%
+      clearControls() %>%
+      addPolygons(
+        data = m,
+        fillColor = ~pal(Year),
+        fillOpacity = 0.65,
+        color = NA,
+        weight = 0,
+        stroke = FALSE,
+        smoothFactor = 0,
+        group = "mesh",
+        options = pathOptions(clickable = FALSE),
+        
+        label = ~htmltools::HTML(
+          paste0(
+            "<b>Region:</b> ",
+            ifelse(is.na(Region_Name) | Region_Name == "", "NA", Region_Name),
+            "<br><b>Value:</b> ",
+            sprintf("%.2f", Year)
+          )
+        )
+      ) %>%
+      
+      # mesh boundary
+      addPolygons(
+        data = m,
+        fill = FALSE,
+        color = "#777777",
+        weight = 0.12,
+        opacity = 0.6,
+        group = "mesh"
+      ) %>%
+      
+      # legend
+      addLegend(
+        pal = pal,
+        values = c(vmin, vmax),
+        title = htmltools::HTML(legend_title_html),
+        position = "bottomright",
+        opacity = 1
+      )
+  }
+  
+  output$o3_plot <- renderLeaflet(init_leaflet())
+  output$pm_plot <- renderLeaflet(init_leaflet())
+  
+  observeEvent(input$btn_run, {
     
     runjs("document.getElementById('outputs').scrollIntoView({behavior:'smooth', block:'start'});")
     req(input$pollutants)
     
     start_time <- Sys.time()
-    log_message("Run button clicked: start prediction")
+    log_message("Run clicked: start prediction")
     
     w$show()
     updateProgressBar(session, "pb", value = 0,  title = "Initializing...")
     updateProgressBar(session, "pb", value = 5,  title = "Validating input...")
     
     m <- vals()
-    if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); return() }
+    if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); w$hide(); return() }
     if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
-      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); return()
+      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); w$hide(); return()
     }
     
     control_vec <- as.numeric(t(m))
@@ -747,208 +862,122 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     store <- list(o3=NULL, pm=NULL)
     
     if (need_o3) {
-      t1 <- Sys.time()
       updateProgressBar(session, "pb", value = 20, title = "Running Ozone prediction...")
-      store$o3 <- predict_with_model(control_vec, models$o3)
+      t1 <- Sys.time()
+      store$o3 <- predict_with_model_fast(control_vec, models$o3, "o3")
+      t2 <- Sys.time()
+      log_message("Ozone total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+      
+      t3 <- Sys.time()
+      m_o3 <- mesh
+      m_o3$Year <- month_means_fast(store$o3)
+      m_o3 <- st_make_valid(m_o3)
+      o3_sf(m_o3)
+      t4 <- Sys.time()
+      log_message("Ozone mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
       
       updateProgressBar(session, "pb", value = if (need_pm) 45 else 80, title = "Ozone prediction finished")
-      t2 <- Sys.time()
-      log_message(sprintf("Ozone prediction finished in %.2f sec", as.numeric(difftime(t2, t1, units = "secs"))))
-      
-      m_o3 <- mesh
-      m_o3$Year <- month_means(store$o3)
-      o3_sf(m_o3)
     } else {
       o3_sf(NULL)
     }
     
     if (need_pm) {
-      t1 <- Sys.time()
-      updateProgressBar(session, "pb", value = if (need_o3) 50 else 20, title = "Running PM₂.₅ prediction...")
-      store$pm <- predict_with_model(control_vec, models$pm)
-      updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = "PM₂.₅ prediction finished")
-      t2 <- Sys.time()
-      log_message(sprintf("PM₂.₅ prediction finished in %.2f sec", as.numeric(difftime(t2, t1, units = "secs"))))
+      updateProgressBar(
+        session, "pb",
+        value = if (need_o3) 50 else 20,
+        title = paste0("Running ", PM25_LABEL_TEXT, " prediction...")
+      )
       
+      t1 <- Sys.time()
+      store$pm <- predict_with_model_fast(control_vec, models$pm, "pm")
+      t2 <- Sys.time()
+      log_message("PM2.5 total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+      
+      t3 <- Sys.time()
       m_pm <- mesh
-      m_pm$Year <- month_means(store$pm)
+      m_pm$Year <- month_means_fast(store$pm)
+      m_pm <- st_make_valid(m_pm)
       pm_sf(m_pm)
+      t4 <- Sys.time()
+      log_message("PM2.5 mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
+      
+      updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = paste0(PM25_LABEL_TEXT, " prediction finished"))
     } else {
       pm_sf(NULL)
     }
     
     result_store(store)
-    updateProgressBar(session, "pb", value = 90, title = "Preparing plots...")
+    updateProgressBar(session, "pb", value = 100, title = "Completed!")
+    w$hide()
     
     end_time <- Sys.time()
-    log_message(sprintf("Total prediction time: %.2f sec", as.numeric(difftime(end_time, start_time, units = "secs"))))
+    log_message("Total run time: %.3f sec", as.numeric(difftime(end_time, start_time, units = "secs")))
   })
   
-  # Plot-done -> complete progress & hide overlay
-  observeEvent(input$plot_done, {
-    updateProgressBar(session, "pb", value = 100, title = "Completed!")
-    Sys.sleep(0.5)
-    w$hide()
+  # -------------------- Leaflet helpers & maps --------------------
+  observeEvent(o3_sf(), ignoreInit = TRUE, {
+    m <- o3_sf()
+    if (is.null(m)) {
+      reset_leaflet("o3_plot")
+      return()
+    }
+    
+    session$sendCustomMessage("markRenderStart", list(map_id = "o3_plot"))
+    t0 <- Sys.time()
+    update_leaflet_map("o3_plot", m, paste0("Ozone (", UNIT_O3_TEXT, ")"))
+    t1 <- Sys.time()
+    log_message("Server leaflet build: o3 = %.3f sec", as.numeric(difftime(t1, t0, units = "secs")))
+    session$sendCustomMessage("probeLeafletRender", list(map_id = "o3_plot"))
   })
   
-  # -------------------- Plot helpers & plots --------------------
-  get_shared_fill_scale <- function(m, legend_title) {
-    vmin <- floor(min(m$Year, na.rm = TRUE) / 10) * 10
-    vmax <- ceiling(max(m$Year, na.rm = TRUE) / 10) * 10
-    scale_fill_gradient(
-      low = "white", high = "red",
-      limits = c(vmin, vmax),
-      breaks = pretty(c(vmin, vmax), n = 5),
-      name = legend_title
-    )
-  }
-  plot_map <- function(m, var_name, legend_title, title_text) {
-    ggplot() +
-      geom_sf(data = asia_map, color = "black", fill = NA) +
-      geom_sf(data = m, aes(fill = .data[[var_name]]), alpha = 0.6, color = "gray") +
-      coord_sf(xlim = c(124, 131), ylim = c(32.5, 39.5), expand = FALSE) +
-      get_shared_fill_scale(m, legend_title) +
-      labs(title = title_text) +
-      theme_minimal() +
-      theme(
-        plot.title   = element_text(hjust = 0.5, face = "bold", size = 18),
-        legend.title = element_text(size = 14, face = "bold"),
-        legend.text  = element_text(size = 12),
-        axis.text    = element_text(size = 12)
-      )
-  }
+  observeEvent(pm_sf(), ignoreInit = TRUE, {
+    m <- pm_sf()
+    if (is.null(m)) {
+      reset_leaflet("pm_plot")
+      return()
+    }
+    
+    session$sendCustomMessage("markRenderStart", list(map_id = "pm_plot"))
+    t0 <- Sys.time()
+    update_leaflet_map("pm_plot", m, PM25_FULL_HTML)
+    t1 <- Sys.time()
+    log_message("Server leaflet build: pm = %.3f sec", as.numeric(difftime(t1, t0, units = "secs")))
+    session$sendCustomMessage("probeLeafletRender", list(map_id = "pm_plot"))
+  })
   
-  output$o3_plot <- renderPlot({
-    m <- o3_sf(); req(m)
-    plot_map(
-      m,
-      "Year",
-      paste0("Ozone (", UNIT_O3_TEXT, ")"),
-      "Ozone Annual Mean"
-    )
-  }, res = 60)
-  
-  output$pm_plot <- renderPlot({
-    m <- pm_sf(); req(m)
-    plot_map(
-      m,
-      "Year",
-      paste0("PM₂.₅ (", UNIT_PM_TEXT, ")"),
-      "PM₂.₅ Annual Mean"
-    )
-  }, res = 60)
+  observeEvent(input$leaflet_render_done, {
+    info <- input$leaflet_render_done
+    log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
+  })
   
   output$o3_mean <- renderText({
-    m <- o3_sf(); req(m)
+    m <- o3_sf()
+    req(!is.null(m))
     paste0("Annual average across all cells: ",
            sprintf("%.1f %s", mean(m$Year, na.rm = TRUE), UNIT_O3_TEXT))
   })
   
   output$o3_summary <- renderText({
-    m <- o3_sf(); req(m)
+    m <- o3_sf()
+    req(!is.null(m))
     rng <- range(m$Year, na.rm = TRUE)
     paste0("Annual range across all cells: ",
            sprintf("%.1f – %.1f %s", rng[1], rng[2], UNIT_O3_TEXT))
   })
   
   output$pm_mean <- renderText({
-    m <- pm_sf(); req(m)
+    m <- pm_sf()
+    req(!is.null(m))
     paste0("Annual average across all cells: ",
            sprintf("%.1f %s", mean(m$Year, na.rm = TRUE), UNIT_PM_TEXT))
   })
   
   output$pm_summary <- renderText({
-    m <- pm_sf(); req(m)
+    m <- pm_sf()
+    req(!is.null(m))
     rng <- range(m$Year, na.rm = TRUE)
     paste0("Annual range across all cells: ",
            sprintf("%.1f – %.1f %s", rng[1], rng[2], UNIT_PM_TEXT))
-  })
-  
-  # -------------------- Hover --------------------
-  observeEvent(input$o3_hover, {
-    m <- o3_sf()
-    if (is.null(m)) return()
-    
-    h <- input$o3_hover
-    if (is.null(h$x) || is.null(h$y)) return()
-    
-    lon <- h$x; lat <- h$y
-    lon_r <- round(lon, 2); lat_r <- round(lat, 2)
-    
-    pt <- st_sfc(st_point(c(lon, lat)), crs = st_crs(m))
-    idx <- which(st_intersects(m, pt, sparse = FALSE))
-    if (length(idx) == 0) { return() }
-    idx <- idx[1]
-    
-    prev <- o3_hover_info()
-    if (!is.null(prev) && !is.null(prev$idx) && identical(prev$idx, idx)) return()
-    
-    region_name <- m$Region_Name[idx]
-    if (is.na(region_name) || region_name == "") region_name <- "NA"
-    value <- m$Year[idx]
-    
-    o3_hover_info(list(idx = idx, region = region_name, lon = lon_r, lat = lat_r, value = value))
-  }, ignoreInit = TRUE)
-  
-  observeEvent(input$pm_hover, {
-    m <- pm_sf()
-    if (is.null(m)) return()
-    
-    h <- input$pm_hover
-    if (is.null(h$x) || is.null(h$y)) return()
-    
-    lon <- h$x; lat <- h$y
-    lon_r <- round(lon, 2); lat_r <- round(lat, 2)
-    
-    pt <- st_sfc(st_point(c(lon, lat)), crs = st_crs(m))
-    idx <- which(st_intersects(m, pt, sparse = FALSE))
-    if (length(idx) == 0) { return() }
-    idx <- idx[1]
-    
-    prev <- pm_hover_info()
-    if (!is.null(prev) && !is.null(prev$idx) && identical(prev$idx, idx)) return()
-    
-    region_name <- m$Region_Name[idx]
-    if (is.na(region_name) || region_name == "") region_name <- "NA"
-    value <- m$Year[idx]
-    
-    pm_hover_info(list(idx = idx, region = region_name, lon = lon_r, lat = lat_r, value = value))
-  }, ignoreInit = TRUE)
-  
-  output$o3_hover_box <- renderUI({
-    info <- o3_hover_info()
-    m    <- o3_sf()
-    if (is.null(info) || is.null(m)) return(NULL)
-    
-    tags$div(
-      class = "hover-box",
-      tags$div(class = "title", "Grid Cell Info (Ozone)"),
-      HTML(sprintf(
-        "<b>Region:</b> %s<br>
-         <b>Longitude:</b> %.2f<br>
-         <b>Latitude:</b> %.2f<br>
-         <b>Annual Mean:</b> %.2f %s<br>",
-        info$region, info$lon, info$lat, info$value, UNIT_O3_TEXT
-      ))
-    )
-  })
-  
-  output$pm_hover_box <- renderUI({
-    info <- pm_hover_info()
-    m    <- pm_sf()
-    if (is.null(info) || is.null(m)) return(NULL)
-    
-    tags$div(
-      class = "hover-box",
-      tags$div(class = "title", "Grid Cell Info (PM₂.₅)"),
-      HTML(sprintf(
-        "<b>Region:</b> %s<br>
-         <b>Longitude:</b> %.2f<br>
-         <b>Latitude:</b> %.2f<br>
-         <b>Annual Mean:</b> %.2f %s<br>",
-        info$region, info$lon, info$lat, info$value, UNIT_PM_HTML
-      ))
-    )
   })
   
   # -------------------- Downloads --------------------
