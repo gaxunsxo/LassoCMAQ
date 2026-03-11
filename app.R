@@ -731,19 +731,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   # -------------------- Run prediction --------------------
   init_leaflet <- function() {
-    leaflet(mesh, options = leafletOptions(preferCanvas = TRUE)) %>%
+    leaflet(options = leafletOptions(preferCanvas = FALSE)) %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
       setView(lng = 127.8, lat = 36.2, zoom = 6) %>%
-      
-      addPolygons(
-        layerId = ~FID_1,
-        fillColor = "white",
-        fillOpacity = 0.65,
-        color = NA,
-        stroke = FALSE,
-        group = "mesh"
-      ) %>%
-      
       addPolygons(
         data = asia_map,
         fill = FALSE,
@@ -770,7 +760,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     vmax <- ceiling(max(x, na.rm = TRUE) / 10) * 10
     
     pal <- leaflet::colorNumeric(
-      palette = "Reds",
+      palette = RColorBrewer::brewer.pal(9, "Reds"),
       domain = c(vmin, vmax),
       na.color = "transparent"
     )
@@ -780,58 +770,80 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   update_leaflet_map <- function(map_id, m, legend_title_html) {
     
-    if (is.null(m) || nrow(m) == 0) {
+    m <- st_make_valid(m)
+    m <- m[!sf::st_is_empty(m), ]
+    
+    if (nrow(m) == 0 || all(is.na(m$Year))) {
       reset_leaflet(map_id)
       return(invisible(NULL))
     }
     
+    bb <- st_bbox(m)
+    
     pal_info <- make_red_pal(m$Year)
-    pal  <- pal_info$pal
+    pal <- pal_info$pal
     vmin <- pal_info$vmin
     vmax <- pal_info$vmax
     
-    leafletProxy(map_id) %>%
+    pal_rev <- leaflet::colorNumeric(
+      palette = rev(RColorBrewer::brewer.pal(9, "Reds")),
+      domain = c(vmin, vmax)
+    )
+    
+    leafletProxy(map_id, data = m) %>%
       clearGroup("mesh") %>%
       clearControls() %>%
+      fitBounds(
+        lng1 = bb["xmin"],
+        lat1 = bb["ymin"],
+        lng2 = bb["xmax"],
+        lat2 = bb["ymax"]
+      ) %>%
       addPolygons(
-        data = m,
         fillColor = ~pal(Year),
-        fillOpacity = 0.65,
-        color = NA,
-        weight = 0,
-        stroke = FALSE,
-        smoothFactor = 0,
+        fillOpacity = 0.7,
+        color = "#00000020",
+        weight = 0.2,
         group = "mesh",
-        options = pathOptions(clickable = FALSE),
-        
-        label = ~htmltools::HTML(
-          paste0(
-            "<b>Region:</b> ",
-            ifelse(is.na(Region_Name) | Region_Name == "", "NA", Region_Name),
-            "<br><b>Value:</b> ",
-            sprintf("%.2f", Year)
+        layerId = ~paste0(Row, "_", Column),
+        label = ~sprintf(
+          "Region: %s\nValue: %.2f",
+          Region_Name,
+          Year
+        ),
+        labelOptions = labelOptions(
+          direction = "auto",
+          textsize = "13px",
+          noHide = FALSE,
+          style = list(
+            "font-weight" = "normal",
+            "padding" = "4px 8px"
           )
+        ),
+        highlightOptions = highlightOptions(
+          weight = 2,
+          color = "#000",
+          bringToFront = TRUE
         )
       ) %>%
-      
-      # mesh boundary
       addPolygons(
-        data = m,
         fill = FALSE,
         color = "#777777",
         weight = 0.12,
         opacity = 0.6,
-        group = "mesh"
+        group = "mesh_boundary"
       ) %>%
-      
-      # legend
       addLegend(
-        pal = pal,
+        pal = pal_rev,
         values = c(vmin, vmax),
         title = htmltools::HTML(legend_title_html),
         position = "bottomright",
-        opacity = 1
+        opacity = 1,
+        labFormat = labelFormat(
+          transform = function(x) sort(x, decreasing = TRUE)
+        )
       )
+    
   }
   
   output$o3_plot <- renderLeaflet(init_leaflet())
@@ -948,6 +960,24 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   observeEvent(input$leaflet_render_done, {
     info <- input$leaflet_render_done
     log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
+  })
+  
+  last_hover_o3 <- reactiveVal(NULL)
+  
+  observeEvent(input$o3_plot_shape_mouseover, {
+    id <- input$o3_plot_shape_mouseover$id
+    if (!identical(id, last_hover_o3())) {
+      last_hover_o3(id)
+    }
+  })
+  
+  last_hover_pm <- reactiveVal(NULL)
+  
+  observeEvent(input$pm_plot_shape_mouseover, {
+    id <- input$pm_plot_shape_mouseover$id
+    if (!identical(id, last_hover_pm())) {
+      last_hover_pm(id)
+    }
   })
   
   output$o3_mean <- renderText({
