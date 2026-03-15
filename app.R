@@ -9,6 +9,10 @@ suppressPackageStartupMessages({
   library(waiter)
   library(shinyWidgets)
   library(leaflet)
+  library(ggplot2)
+  library(base64enc)
+  library(scales)
+  library(RColorBrewer)
 })
 
 # -------------------- Constants --------------------
@@ -66,6 +70,39 @@ region_outline <- mesh %>%
   group_by(Region_Name) %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   st_make_valid()
+
+# -------------------- Load weight summary --------------------
+O3_weight_summary <- read.csv(
+  "/home/geseo/LassoCMAQ_Data/O3_Weight_Summary.csv",
+  stringsAsFactors = FALSE
+)
+
+PM_weight_summary <- read.csv(
+  "/home/geseo/LassoCMAQ_Data/PM_Weight_Summary.csv",
+  stringsAsFactors = FALSE
+)
+
+# -------------------- Sector mapping --------------------
+sector_map <- c(
+  "POW" = "Power",
+  "IND" = "Industry",
+  "MO"  = "Mobile",
+  "RE"  = "Residential",
+  "ARG"  = "Agriculture",
+  "SOL" = "Solvent",
+  "OTH" = "Others"
+)
+
+sector_colors <- c(
+  "Power"       = "#D3D3E8",
+  "Industry"    = "#FFC300",
+  "Industrial"  = "#FFC300",
+  "Mobile"      = "#FFFFB3",
+  "Residential" = "#A2D9CE",
+  "Agriculture" = "#E3B8EA",
+  "Solvent"     = "#FF9999",
+  "Others"      = "#C2B280"
+)
 
 # -------------------- Load model objects --------------------
 # Ozone
@@ -249,8 +286,8 @@ ui <- page_fluid(
                           card_body(
                             h5("What Is This", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using LASSO with an adaptive logit transformation."),
-                              tags$li("It estimates Ozone or PM2.5 concentrations from regional emission-control scenarios in about 10 seconds each.")
+                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using the least absolute shrinkage and selection operator (LASSO) together with an adaptive logit transformation of the response variable."),
+                              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each, providing a full surrogate of CMAQ by computing concentrations for every cell at every hour, and enabling rapid what-if exploration without running CMAQ.")
                             )
                           )
                      ),
@@ -258,10 +295,10 @@ ui <- page_fluid(
                           card_body(
                             h5("How to Use", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Source)."),
-                              tags$li("2. Select pollutant(s) and click Run."),
-                              tags$li("3. Inspect maps and summary metrics; adjust and rerun."),
-                              tags$li("4. Download results as needed.")
+                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Emission Source Category) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline scenario)."),
+                              tags$li("2. Select pollutant(s) and click Run to approximate a CMAQ simulation for the selected control policy."),
+                              tags$li("3. Inspect maps and summary metrics; click a region cell to view Top 5 weights."),
+                              tags$li("4. Download the control policy and the full CMAQ approximation results as needed.")
                             )
                           )
                      ),
@@ -269,7 +306,7 @@ ui <- page_fluid(
                           card_body(
                             h5("Citation", class="fw-bold mb-2"),
                             tags$blockquote(
-                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for CMAQ: application to ozone and PM2.5 policy support (submitted)"
+                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for the Community Multiscale Air Quality Modeling System: application to ozone and PM2.5 policy support (submitted)"
                             )
                           )
                      )
@@ -729,6 +766,95 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   o3_sf <- reactiveVal(NULL)
   pm_sf <- reactiveVal(NULL)
   
+  # -------------------- Weight popup helpers --------------------
+  get_weight_top5 <- function(region, pollutant) {
+    
+    df <- if (pollutant == "o3") O3_weight_summary else PM_weight_summary
+    
+    out <- df %>%
+      dplyr::filter(Target_Region == region) %>%
+      dplyr::arrange(desc(Weight_Ratio)) %>%
+      dplyr::slice_head(n = 5) %>%
+      dplyr::mutate(
+        SectorFull = unname(sector_map[Input_Sector]),
+        SectorFull = ifelse(is.na(SectorFull), "Others", SectorFull),
+        Label = paste(Input_Region, SectorFull, sep = "\n"),
+        TextColor2 = ifelse(tolower(TextColor) == "red", "#FF0000", "#2E8B57")
+      )
+    
+    out
+  }
+  
+  make_weight_plot <- function(region, pollutant) {
+    
+    df <- get_weight_top5(region, pollutant)
+    if (nrow(df) == 0) return(NULL)
+    
+    top5_sum <- sum(df$Weight_Ratio, na.rm = TRUE)
+    xmax <- max(df$Weight_Ratio, na.rm = TRUE) * 1.25
+    
+    ggplot(
+      df,
+      aes(
+        x = Weight_Ratio,
+        y = reorder(Label, Weight_Ratio),
+        fill = SectorFull
+      )
+    ) +
+      geom_col(width = 0.7, color = "black") +
+      geom_text(
+        aes(
+          label = sprintf("%.2f%%", Weight_Ratio),
+          color = TextColor2
+        ),
+        hjust = -0.08,
+        size = 5,
+        show.legend = FALSE,
+        fontface = "bold"
+      ) +
+      scale_fill_manual(values = sector_colors) +
+      scale_color_identity() +
+      scale_x_continuous(
+        limits = c(0, xmax),
+        expand = expansion(mult = c(0, 0.02))
+      ) +
+      labs(
+        title = paste0(region),
+        x = NULL,
+        y = "Sector"
+      ) +
+      annotate(
+        "label",
+        x = xmax * 0.96,
+        y = 0.55,
+        label = sprintf("%.2f%%", top5_sum),
+        size = 5,
+        fontface = "bold"
+      ) +
+      theme_bw(base_size = 16) +
+      theme(
+        legend.position = "none",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.title.y = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        panel.grid.major.y = element_blank()
+      )
+  }
+  
+  plot_to_popup <- function(plot_obj) {
+    if (is.null(plot_obj)) return(htmltools::HTML("<div>No data</div>"))
+    
+    tmp <- tempfile(fileext = ".png")
+    png(tmp, width = 900, height = 520, res = 110)
+    print(plot_obj)
+    dev.off()
+    
+    img <- base64enc::dataURI(file = tmp, mime = "image/png")
+    htmltools::HTML(
+      paste0("<img src='", img, "' width='500px'>")
+    )
+  }
+  
   # -------------------- Run prediction --------------------
   init_leaflet <- function() {
     leaflet(options = leafletOptions(preferCanvas = FALSE)) %>%
@@ -740,19 +866,18 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         color = "#444444",
         weight = 1,
         opacity = 0.9,
-        group = "boundary"
+        group = "boundary",
+        options = pathOptions(interactive = FALSE)
       )
   }
   
   reset_leaflet <- function(map_id) {
     leafletProxy(map_id) %>%
       clearGroup("mesh") %>%
+      clearGroup("mesh_boundary") %>%
       clearControls() %>%
+      clearPopups() %>%
       setView(lng = 127.8, lat = 36.2, zoom = 6)
-  }
-  
-  blend_white_red <- function(x, alpha = 0.6) {
-    rgb(1, 1 - alpha * x, 1 - alpha * x)
   }
   
   make_red_pal <- function(x) {
@@ -792,7 +917,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     
     leafletProxy(map_id, data = m) %>%
       clearGroup("mesh") %>%
+      clearGroup("mesh_boundary") %>%
       clearControls() %>%
+      clearPopups() %>%
       fitBounds(
         lng1 = bb["xmin"],
         lat1 = bb["ymin"],
@@ -831,7 +958,8 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         color = "#777777",
         weight = 0.12,
         opacity = 0.6,
-        group = "mesh_boundary"
+        group = "mesh_boundary",
+        options = pathOptions(interactive = FALSE)
       ) %>%
       addLegend(
         pal = pal_rev,
@@ -843,7 +971,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
           transform = function(x) sort(x, decreasing = TRUE)
         )
       )
-    
   }
   
   output$o3_plot <- renderLeaflet(init_leaflet())
@@ -862,9 +989,15 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     updateProgressBar(session, "pb", value = 5,  title = "Validating input...")
     
     m <- vals()
-    if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); w$hide(); return() }
+    if (any(!is.finite(m))) {
+      showModal(modalDialog("All cells must be numeric.", easyClose=TRUE))
+      w$hide()
+      return()
+    }
     if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
-      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); w$hide(); return()
+      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE))
+      w$hide()
+      return()
     }
     
     control_vec <- as.numeric(t(m))
@@ -960,6 +1093,62 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   observeEvent(input$leaflet_render_done, {
     info <- input$leaflet_render_done
     log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
+  })
+  
+  observeEvent(input$o3_plot_shape_click, ignoreInit = TRUE, {
+    id <- input$o3_plot_shape_click$id
+    req(id)
+    
+    rc <- strsplit(id, "_")[[1]]
+    r <- as.numeric(rc[1])
+    c <- as.numeric(rc[2])
+    
+    region <- mesh %>%
+      dplyr::filter(Row == r, Column == c) %>%
+      dplyr::pull(Region_Name) %>%
+      unique()
+    
+    req(length(region) > 0)
+    
+    p <- make_weight_plot(region[1], "o3")
+    popup <- plot_to_popup(p)
+    
+    leafletProxy("o3_plot") %>%
+      clearPopups() %>%
+      addPopups(
+        lng = input$o3_plot_shape_click$lng,
+        lat = input$o3_plot_shape_click$lat,
+        popup = popup,
+        options = popupOptions(maxWidth = 560)
+      )
+  })
+  
+  observeEvent(input$pm_plot_shape_click, ignoreInit = TRUE, {
+    id <- input$pm_plot_shape_click$id
+    req(id)
+    
+    rc <- strsplit(id, "_")[[1]]
+    r <- as.numeric(rc[1])
+    c <- as.numeric(rc[2])
+    
+    region <- mesh %>%
+      dplyr::filter(Row == r, Column == c) %>%
+      dplyr::pull(Region_Name) %>%
+      unique()
+    
+    req(length(region) > 0)
+    
+    p <- make_weight_plot(region[1], "pm")
+    popup <- plot_to_popup(p)
+    
+    leafletProxy("pm_plot") %>%
+      clearPopups() %>%
+      addPopups(
+        lng = input$pm_plot_shape_click$lng,
+        lat = input$pm_plot_shape_click$lat,
+        popup = popup,
+        options = popupOptions(maxWidth = 560)
+      )
   })
   
   last_hover_o3 <- reactiveVal(NULL)
