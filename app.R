@@ -14,7 +14,11 @@ suppressPackageStartupMessages({
   library(scales)
   library(RColorBrewer)
   library(filelock)
+  library(future)
+  library(promises)
 })
+
+plan(multisession, workers = 1)
 
 # -------------------- Constants --------------------
 region_names <- c(
@@ -24,7 +28,18 @@ region_names <- c(
 factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
 
 # -------------------- Global execution lock --------------------
-LOCK_PATH <- "/tmp/lassocmaq_prediction.lock"
+LOCK_PATH   <- "/tmp/lassocmaq_prediction.lock"
+STATUS_PATH <- "/tmp/lassocmaq_status.txt"
+
+writeLines("IDLE", STATUS_PATH)
+
+set_global_status <- function(status) {
+  try(writeLines(status, STATUS_PATH), silent = TRUE)
+}
+
+read_global_status <- function() {
+  tryCatch(readLines(STATUS_PATH, n = 1, warn = FALSE), error = function(e) "IDLE")
+}
 
 acquire_global_lock <- function(timeout = 0) {
   dir.create(dirname(LOCK_PATH), recursive = TRUE, showWarnings = FALSE)
@@ -34,7 +49,11 @@ acquire_global_lock <- function(timeout = 0) {
     if (!ok) stop("Failed to create lock file.")
   }
   
-  filelock::lock(LOCK_PATH, timeout = timeout)
+  result <- tryCatch(
+    filelock::lock(LOCK_PATH, timeout = timeout),
+    error = function(e) NULL
+  )
+  result
 }
 
 release_global_lock <- function(lock_obj) {
@@ -280,7 +299,7 @@ ui <- page_fluid(
           });
         });
       });
-      
+
       window.__policyScroll = { pageY: 0, tableY: 0 };
 
       Shiny.addCustomMessageHandler('savePolicyScroll', function(msg) {
@@ -450,11 +469,35 @@ ui <- page_fluid(
 server <- function(input, output, session) {
   # -------------------- Session --------------------
   is_running <- reactiveVal(FALSE)
+  
+  pending_run <- reactiveVal(NULL)
   observe({
     shinyjs::toggleState("btn_run", condition = !is_running())
   })
   
-  # Logging 
+  global_status <- reactivePoll(
+    intervalMillis = 500,
+    session        = session,
+    checkFunc      = function() read_global_status(),
+    valueFunc      = function() read_global_status()
+  )
+  
+  observe({
+    busy <- (global_status() == "BUSY") || is_running()
+    shinyjs::toggleState("btn_run", condition = !busy)
+  })
+  
+  observeEvent(global_status(), ignoreInit = TRUE, {
+    if (global_status() == "IDLE" && !is.null(pending_run()) && !is_running()) {
+      req_data <- pending_run()
+      pending_run(NULL)
+      removeModal()
+      log_message("IDLE detected: firing pending prediction")
+      do_prediction(req_data$control_vec, req_data$need_o3, req_data$need_pm)
+    }
+  })
+  
+  # Logging
   log_file <- "run.log"
   log_message <- function(fmt, ...) {
     ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
@@ -605,7 +648,7 @@ function bindRowInputs(api){
            });
            return;
          }
-         
+
          Shiny.setInputValue('js_save_scroll', {nonce: Math.random()});
          Shiny.setInputValue('cell_edit', {row: row, col: col, val: val, nonce: Math.random()});
        });
@@ -713,7 +756,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     }
   })
   
-  # Upload policy
   observeEvent(input$scenario_upload, {
     req(input$scenario_upload)
     ext <- tolower(tools::file_ext(input$scenario_upload$name))
@@ -753,297 +795,225 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     })
   })
   
-  # -------------------- Models & prediction --------------------
+  # ── Models & reactive stores ───────────────────────────────────────────────
   models <- list(
-    o3 = list(
-      WEIGHT = O3_WEIGHT, BIAS = O3_BIAS, ADAPT = O3_Adapt,
-      CMAQ_UNIQUE = O3_CMAQ_UNIQUE, SCALE = 1000
-    ),
-    pm = list(
-      WEIGHT = PM_WEIGHT, BIAS = PM_BIAS, ADAPT = PM_Adapt,
-      CMAQ_UNIQUE = PM_CMAQ_UNIQUE, SCALE = 1
-    )
+    o3 = list(WEIGHT=O3_WEIGHT, BIAS=O3_BIAS, ADAPT=O3_Adapt, CMAQ_UNIQUE=O3_CMAQ_UNIQUE, SCALE=1000),
+    pm = list(WEIGHT=PM_WEIGHT, BIAS=PM_BIAS, ADAPT=PM_Adapt, CMAQ_UNIQUE=PM_CMAQ_UNIQUE, SCALE=1)
   )
   
   linear_cache <- reactiveVal(list(
-    o3 = list(control = NULL, linear = NULL),
-    pm = list(control = NULL, linear = NULL)
+    o3 = list(control=NULL, linear=NULL),
+    pm = list(control=NULL, linear=NULL)
   ))
   
-  DELTA_THRESHOLD <- 10L
-  
-  fast_linear_vec <- function(control_vec, model, key) {
-    cache <- linear_cache()[[key]]
-    
-    if (is.null(cache$control) || is.null(cache$linear)) {
-      t0 <- Sys.time()
-      linear_vec <- as.vector(matrix(control_vec, nrow = 1) %*% model$WEIGHT)
-      t1 <- Sys.time()
-      log_message("%s linear(full) computed: %.3f sec", key, as.numeric(difftime(t1, t0, units = "secs")))
-      
-      new_cache <- linear_cache()
-      new_cache[[key]] <- list(control = control_vec, linear = linear_vec)
-      linear_cache(new_cache)
-      return(linear_vec)
-    }
-    
-    delta <- control_vec - cache$control
-    idx <- which(delta != 0)
-    
-    if (length(idx) == 0) {
-      log_message("%s linear reused (no change)", key)
-      return(cache$linear)
-    }
-    
-    if (length(idx) <= DELTA_THRESHOLD) {
-      t0 <- Sys.time()
-      add <- as.vector(matrix(delta[idx], nrow = 1) %*% model$WEIGHT[idx, , drop = FALSE])
-      linear_vec <- cache$linear + add
-      t1 <- Sys.time()
-      log_message("%s linear(delta=%d) updated: %.3f sec", key, length(idx), as.numeric(difftime(t1, t0, units = "secs")))
-    } else {
-      t0 <- Sys.time()
-      linear_vec <- as.vector(matrix(control_vec, nrow = 1) %*% model$WEIGHT)
-      t1 <- Sys.time()
-      log_message("%s linear(full, delta=%d) computed: %.3f sec", key, length(idx), as.numeric(difftime(t1, t0, units = "secs")))
-    }
-    
-    new_cache <- linear_cache()
-    new_cache[[key]] <- list(control = control_vec, linear = linear_vec)
-    linear_cache(new_cache)
-    linear_vec
-  }
-  
-  month_means_fast <- function(arr) {
-    d <- dim(arr)
-    if (is.null(d)) stop("Pred has no dim.")
-    ncell <- d[1]
-    mat <- matrix(arr, nrow = ncell)
-    rowMeans(mat)
-  }
-  
-  predict_with_model_fast <- function(control_vec, model, key) {
-    linear_vec  <- fast_linear_vec(control_vec, model, key)
-    
-    t0 <- Sys.time()
-    dims        <- dim(model$BIAS)
-    linear_arr  <- array(linear_vec, dim = dims)
-    linear_pred <- linear_arr + model$BIAS
-    Pred        <- model$ADAPT / (1 + exp(-linear_pred))
-    if (!is.null(model$CMAQ_UNIQUE)) Pred[model$CMAQ_UNIQUE] <- model$BIAS[model$CMAQ_UNIQUE]
-    Pred <- Pred * model$SCALE
-    t1 <- Sys.time()
-    log_message("%s postprocess computed: %.3f sec", key, as.numeric(difftime(t1, t0, units = "secs")))
-    Pred
-  }
-  
   result_store <- reactiveVal(list(o3=NULL, pm=NULL))
-  o3_sf <- reactiveVal(NULL)
-  pm_sf <- reactiveVal(NULL)
+  o3_sf        <- reactiveVal(NULL)
+  pm_sf        <- reactiveVal(NULL)
   
-  # -------------------- Weight popup helpers --------------------
-  get_weight_top5 <- function(region, pollutant) {
+  do_prediction <- function(control_vec, need_o3, need_pm) {
+    lock_obj <- acquire_global_lock(timeout = 0)
+    if (is.null(lock_obj)) {
+      log_message("do_prediction: lock contention, re-queuing")
+      pending_run(list(control_vec=control_vec, need_o3=need_o3, need_pm=need_pm))
+      return()
+    }
     
-    df <- if (pollutant == "o3") O3_weight_summary else PM_weight_summary
+    log_message("Global lock acquired")
+    is_running(TRUE)
+    set_global_status("BUSY")
+    w$show()
+    updateProgressBar(session, "pb", value=0,  title="Initializing...")
+    updateProgressBar(session, "pb", value=10, title="Running prediction (async)...")
     
-    out <- df %>%
-      dplyr::filter(Target_Region == region) %>%
-      dplyr::arrange(desc(Weight_Ratio)) %>%
-      dplyr::slice_head(n = 5) %>%
-      dplyr::mutate(
-        SectorFull = unname(sector_map[Input_Sector]),
-        SectorFull = ifelse(is.na(SectorFull), "Others", SectorFull),
-        Label = paste(Input_Region, SectorFull, sep = "\n"),
-        TextColor2 = ifelse(tolower(TextColor) == "red", "#FF0000", "#2E8B57")
-      )
+    .models    <- models
+    .mesh      <- mesh
+    start_time <- Sys.time()
     
-    out
-  }
-  
-  make_weight_plot <- function(region, pollutant) {
+    fut <- future({
+      run_result <- tryCatch({
+        store <- list(o3=NULL, pm=NULL)
+        if (need_o3) {
+          t1       <- Sys.time()
+          lv       <- as.vector(matrix(control_vec, nrow=1) %*% .models$o3$WEIGHT)
+          la       <- array(lv, dim=dim(.models$o3$BIAS))
+          pred     <- .models$o3$ADAPT / (1 + exp(-(la + .models$o3$BIAS)))
+          if (!is.null(.models$o3$CMAQ_UNIQUE)) pred[.models$o3$CMAQ_UNIQUE] <- .models$o3$BIAS[.models$o3$CMAQ_UNIQUE]
+          pred     <- pred * .models$o3$SCALE
+          store$o3 <- rowMeans(matrix(pred, nrow=dim(pred)[1]))
+          message(sprintf("[worker] O3: %.3f sec", as.numeric(difftime(Sys.time(), t1, units="secs"))))
+        }
+        if (need_pm) {
+          t1       <- Sys.time()
+          lv       <- as.vector(matrix(control_vec, nrow=1) %*% .models$pm$WEIGHT)
+          la       <- array(lv, dim=dim(.models$pm$BIAS))
+          pred     <- .models$pm$ADAPT / (1 + exp(-(la + .models$pm$BIAS)))
+          if (!is.null(.models$pm$CMAQ_UNIQUE)) pred[.models$pm$CMAQ_UNIQUE] <- .models$pm$BIAS[.models$pm$CMAQ_UNIQUE]
+          pred     <- pred * .models$pm$SCALE
+          store$pm <- rowMeans(matrix(pred, nrow=dim(pred)[1]))
+          message(sprintf("[worker] PM2.5: %.3f sec", as.numeric(difftime(Sys.time(), t1, units="secs"))))
+        }
+        list(ok=TRUE, store=store)
+      }, error = function(e) list(ok=FALSE, msg=e$message))
+      run_result
+    }, globals = list(control_vec=control_vec, need_o3=need_o3, need_pm=need_pm, .models=.models),
+    packages = c("sf","dplyr"))
     
-    df <- get_weight_top5(region, pollutant)
-    if (nrow(df) == 0) return(NULL)
-    
-    top5_sum <- sum(df$Weight_Ratio, na.rm = TRUE)
-    xmax <- max(df$Weight_Ratio, na.rm = TRUE) * 1.40
-    
-    ggplot(
-      df,
-      aes(
-        x = Weight_Ratio,
-        y = reorder(Label, Weight_Ratio),
-        fill = SectorFull
-      )
-    ) +
-      geom_col(width = 0.7, color = "black") +
-      geom_text(
-        aes(
-          label = sprintf("%.1f%%", Weight_Ratio),
-          color = TextColor2
-        ),
-        hjust = -0.08,
-        size = 5,
-        show.legend = FALSE,
-        fontface = "bold"
-      ) +
-      scale_fill_manual(values = sector_colors) +
-      scale_color_identity() +
-      scale_x_continuous(
-        limits = c(0, xmax),
-        expand = expansion(mult = c(0, 0.02))
-      ) +
-      labs(
-        title = paste0(region),
-        x = "Ratio (%)",
-        y = "Region-Sector"
-      ) +
-      annotate(
-        "label",
-        x = xmax * 0.95,
-        y = 0.56,
-        label = sprintf("%.1f%%", top5_sum),
-        size = 5,
-        fontface = "bold"
-      ) +
-      theme_bw(base_size = 16) +
-      theme(
-        legend.position = "none",
-        plot.title = element_text(face = "bold", hjust = 0.5),
-        axis.title.x = element_text(face = "bold"),
-        axis.title.y = element_text(face = "bold"),
-        axis.text.x = element_text(face = "bold"),
-        axis.text.y = element_text(face = "bold"),
-        panel.grid.major.y = element_blank()
-      )
-  }
-  
-  plot_to_popup <- function(plot_obj) {
-    if (is.null(plot_obj)) return(htmltools::HTML("<div>No data</div>"))
-    
-    tmp <- tempfile(fileext = ".png")
-    png(tmp, width = 900, height = 520, res = 110)
-    print(plot_obj)
-    dev.off()
-    
-    img <- base64enc::dataURI(file = tmp, mime = "image/png")
-    htmltools::HTML(
-      paste0("<img src='", img, "' width='500px'>")
+    promises::then(fut,
+                   onFulfilled = function(res) {
+                     release_global_lock(lock_obj)
+                     set_global_status("IDLE")
+                     log_message("Global lock released")
+                     is_running(FALSE)
+                     w$hide()
+                     
+                     if (!res$ok) {
+                       log_message("Async prediction failed: %s", res$msg)
+                       showModal(modalDialog(title="Prediction Error", paste("An error occurred:", res$msg), easyClose=TRUE))
+                       return()
+                     }
+                     
+                     store <- res$store
+                     if (need_o3 && !is.null(store$o3)) {
+                       updateProgressBar(session, "pb", value=80, title="Ozone: building map...")
+                       m_o3 <- .mesh; m_o3$Year <- store$o3; o3_sf(sf::st_make_valid(m_o3))
+                     } else { o3_sf(NULL) }
+                     
+                     if (need_pm && !is.null(store$pm)) {
+                       updateProgressBar(session, "pb", value=90, title="PM2.5: building map...")
+                       m_pm <- .mesh; m_pm$Year <- store$pm; pm_sf(sf::st_make_valid(m_pm))
+                     } else { pm_sf(NULL) }
+                     
+                     nc <- linear_cache()
+                     if (need_o3) nc$o3 <- list(control=control_vec, linear=as.vector(matrix(control_vec,nrow=1) %*% models$o3$WEIGHT))
+                     if (need_pm) nc$pm <- list(control=control_vec, linear=as.vector(matrix(control_vec,nrow=1) %*% models$pm$WEIGHT))
+                     linear_cache(nc)
+                     
+                     result_store(store)
+                     updateProgressBar(session, "pb", value=100, title="Completed!")
+                     log_message("Total run time: %.3f sec", as.numeric(difftime(Sys.time(), start_time, units="secs")))
+                   },
+                   onRejected = function(err) {
+                     release_global_lock(lock_obj)
+                     set_global_status("IDLE")
+                     log_message("Global lock released (on rejection)")
+                     is_running(FALSE)
+                     w$hide()
+                     log_message("Future rejected: %s", conditionMessage(err))
+                     showModal(modalDialog(title="Prediction Error", paste("An unexpected error occurred:", conditionMessage(err)), easyClose=TRUE))
+                   }
     )
+    
+    NULL
   }
   
-  # -------------------- Run prediction --------------------
+  # ── btn_run ────────────────────────────────────────────────────────────────
+  observeEvent(input$btn_run, {
+    runjs("document.getElementById('outputs').scrollIntoView({behavior:'smooth', block:'start'});")
+    req(input$pollutants)
+    
+    m <- vals()
+    if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); return() }
+    if (any(m < 0.5 | m > 1.5, na.rm=TRUE)) { showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); return() }
+    
+    control_vec <- as.numeric(t(m))
+    need_o3     <- "o3"   %in% input$pollutants
+    need_pm     <- "pm25" %in% input$pollutants
+    
+    if (read_global_status() == "BUSY") {
+      pending_run(list(control_vec=control_vec, need_o3=need_o3, need_pm=need_pm))
+      log_message("Run queued: another user is running a prediction")
+      showModal(modalDialog(
+        title = "Another Prediction Is Running",
+        tagList(
+          tags$p("Another user is currently running a prediction."),
+          tags$p(
+            "Your scenario has been saved and will run automatically ",
+            "once the current prediction finishes."
+          ),
+          tags$p("You can monitor the progress in the progress bar.")
+        ),
+        footer    = modalButton("Close"),
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    do_prediction(control_vec, need_o3, need_pm)
+  })
+  
+  # ── Leaflet ────────────────────────────────────────────────────────────────
   init_leaflet <- function() {
-    leaflet(options = leafletOptions(preferCanvas = FALSE)) %>%
+    leaflet(options = leafletOptions(preferCanvas=FALSE)) %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
-      setView(lng = 127.8, lat = 36.2, zoom = 6) %>%
-      addPolygons(
-        data = asia_map,
-        fill = FALSE,
-        color = "#444444",
-        weight = 1,
-        opacity = 0.9,
-        group = "boundary",
-        options = pathOptions(interactive = FALSE)
-      )
+      setView(lng=127.8, lat=36.2, zoom=6) %>%
+      addPolygons(data=asia_map, fill=FALSE, color="#444444", weight=1, opacity=0.9,
+                  group="boundary", options=pathOptions(interactive=FALSE))
   }
   
   reset_leaflet <- function(map_id) {
     leafletProxy(map_id) %>%
-      clearGroup("mesh") %>%
-      clearGroup("mesh_boundary") %>%
-      clearControls() %>%
-      clearPopups() %>%
-      setView(lng = 127.8, lat = 36.2, zoom = 6)
+      clearGroup("mesh") %>% clearControls() %>% clearPopups() %>%
+      setView(lng=127.8, lat=36.2, zoom=6)
   }
   
   make_red_pal <- function(x) {
-    vmin <- floor(min(x, na.rm = TRUE) / 10) * 10
-    vmax <- ceiling(max(x, na.rm = TRUE) / 10) * 10
-    
-    pal <- leaflet::colorNumeric(
-      palette = RColorBrewer::brewer.pal(9, "Reds"),
-      domain = c(vmin, vmax),
-      na.color = "transparent"
-    )
-    
-    list(pal = pal, vmin = vmin, vmax = vmax)
+    vmin <- floor(min(x, na.rm=TRUE) / 10) * 10
+    vmax <- ceiling(max(x, na.rm=TRUE) / 10) * 10
+    pal  <- leaflet::colorNumeric(palette=RColorBrewer::brewer.pal(9,"Reds"), domain=c(vmin,vmax), na.color="transparent")
+    list(pal=pal, vmin=vmin, vmax=vmax)
   }
   
   update_leaflet_map <- function(map_id, m, legend_title_html) {
+    m <- st_make_valid(m); m <- m[!sf::st_is_empty(m), ]
+    if (nrow(m) == 0 || all(is.na(m$Year))) { reset_leaflet(map_id); return(invisible(NULL)) }
     
-    m <- st_make_valid(m)
-    m <- m[!sf::st_is_empty(m), ]
-    
-    if (nrow(m) == 0 || all(is.na(m$Year))) {
-      reset_leaflet(map_id)
-      return(invisible(NULL))
-    }
-    
-    bb <- st_bbox(m)
-    
+    bb       <- st_bbox(m)
     pal_info <- make_red_pal(m$Year)
-    pal <- pal_info$pal
-    vmin <- pal_info$vmin
-    vmax <- pal_info$vmax
-    
-    pal_rev <- leaflet::colorNumeric(
-      palette = rev(RColorBrewer::brewer.pal(9, "Reds")),
-      domain = c(vmin, vmax)
-    )
+    pal      <- pal_info$pal; vmin <- pal_info$vmin; vmax <- pal_info$vmax
+    pal_rev  <- leaflet::colorNumeric(palette=rev(RColorBrewer::brewer.pal(9,"Reds")), domain=c(vmin,vmax))
     
     leafletProxy(map_id, data = m) %>%
       clearGroup("mesh") %>%
-      clearGroup("mesh_boundary") %>%
       clearControls() %>%
       clearPopups() %>%
       fitBounds(
-        lng1 = bb["xmin"],
-        lat1 = bb["ymin"],
-        lng2 = bb["xmax"],
-        lat2 = bb["ymax"]
+        lng1 = bb["xmin"], lat1 = bb["ymin"],
+        lng2 = bb["xmax"], lat2 = bb["ymax"]
       ) %>%
       addPolygons(
-        fillColor = ~pal(Year),
+        # Fill
+        fillColor   = ~pal(Year),
         fillOpacity = 0.7,
-        color = "#00000020",
-        weight = 0.2,
-        group = "mesh",
+        # Border
+        color   = "#555555",
+        weight  = 0.4,
+        opacity = 0.5,
+        # Identity
+        group   = "mesh",
         layerId = ~paste0(Row, "_", Column),
-        label = ~sprintf(
-          "Region: %s, Value: %.1f",
-          Region_Name,
-          Year
-        ),
+        # Hover label
+        label        = ~sprintf("Region: %s, Value: %.1f", Region_Name, Year),
         labelOptions = labelOptions(
           direction = "auto",
-          textsize = "13px",
-          noHide = FALSE,
-          style = list(
-            "font-weight" = "normal",
-            "padding" = "4px 8px"
-          )
+          textsize  = "13px",
+          noHide    = FALSE,
+          sticky    = FALSE,
+          style     = list("font-weight" = "normal", "padding" = "4px 8px")
         ),
+        # Hover highlight
         highlightOptions = highlightOptions(
-          weight = 2,
-          color = "#000",
-          bringToFront = TRUE
+          weight      = 0.4,
+          opacity     = 0.5,
+          fillOpacity = 0.7,
+          bringToFront = FALSE
         )
       ) %>%
-      addPolygons(
-        fill = FALSE,
-        color = "#777777",
-        weight = 0.12,
-        opacity = 0.6,
-        group = "mesh_boundary",
-        options = pathOptions(interactive = FALSE)
-      ) %>%
       addLegend(
-        pal = pal_rev,
-        values = c(vmin, vmax),
-        title = htmltools::HTML(legend_title_html),
+        pal      = pal_rev,
+        values   = c(vmin, vmax),
+        title    = htmltools::HTML(legend_title_html),
         position = "bottomright",
-        opacity = 1,
+        opacity  = 1,
         labFormat = labelFormat(
           transform = function(x) sort(x, decreasing = TRUE)
         )
@@ -1053,146 +1023,22 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$o3_plot <- renderLeaflet(init_leaflet())
   output$pm_plot <- renderLeaflet(init_leaflet())
   
-  observeEvent(input$btn_run, {
-    runjs("document.getElementById('outputs').scrollIntoView({behavior:'smooth', block:'start'});")
-    req(input$pollutants)
-    
-    lock_obj <- NULL
-    
-    tryCatch({
-      # -------------------- Global lock acquire --------------------
-      lock_obj <- acquire_global_lock(timeout = 0)
-      
-      if (is.null(lock_obj)) {
-        showModal(modalDialog(
-          title = "Prediction Busy",
-          "Another user is currently running a prediction. Please try again after the current run finishes.",
-          easyClose = TRUE
-        ))
-        log_message("Run rejected: another user already holds the global lock")
-        return()
-      }
-      
-      on.exit({
-        release_global_lock(lock_obj)
-        log_message("Global lock released")
-      }, add = TRUE)
-      
-      start_time <- Sys.time()
-      log_message("Run clicked: start prediction (global lock acquired)")
-      
-      w$show()
-      on.exit(w$hide(), add = TRUE)
-      
-      updateProgressBar(session, "pb", value = 0,  title = "Initializing...")
-      updateProgressBar(session, "pb", value = 5,  title = "Validating input...")
-      
-      m <- vals()
-      if (any(!is.finite(m))) {
-        showModal(modalDialog("All cells must be numeric.", easyClose = TRUE))
-        return()
-      }
-      if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
-        showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE))
-        return()
-      }
-      
-      control_vec <- as.numeric(t(m))
-      need_o3 <- "o3" %in% input$pollutants
-      need_pm <- "pm25" %in% input$pollutants
-      
-      store <- list(o3 = NULL, pm = NULL)
-      
-      if (need_o3) {
-        updateProgressBar(session, "pb", value = 20, title = "Running Ozone prediction...")
-        t1 <- Sys.time()
-        store$o3 <- predict_with_model_fast(control_vec, models$o3, "o3")
-        t2 <- Sys.time()
-        log_message("Ozone total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
-        
-        t3 <- Sys.time()
-        m_o3 <- mesh
-        m_o3$Year <- month_means_fast(store$o3)
-        m_o3 <- st_make_valid(m_o3)
-        o3_sf(m_o3)
-        t4 <- Sys.time()
-        log_message("Ozone mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
-        
-        updateProgressBar(session, "pb", value = if (need_pm) 45 else 80, title = "Ozone prediction finished")
-      } else {
-        o3_sf(NULL)
-      }
-      
-      if (need_pm) {
-        updateProgressBar(
-          session, "pb",
-          value = if (need_o3) 50 else 20,
-          title = paste0("Running ", PM25_LABEL_TEXT, " prediction...")
-        )
-        
-        t1 <- Sys.time()
-        store$pm <- predict_with_model_fast(control_vec, models$pm, "pm")
-        t2 <- Sys.time()
-        log_message("PM2.5 total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
-        
-        t3 <- Sys.time()
-        m_pm <- mesh
-        m_pm$Year <- month_means_fast(store$pm)
-        m_pm <- st_make_valid(m_pm)
-        pm_sf(m_pm)
-        t4 <- Sys.time()
-        log_message("PM2.5 mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
-        
-        updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = paste0(PM25_LABEL_TEXT, " prediction finished"))
-      } else {
-        pm_sf(NULL)
-      }
-      
-      result_store(store)
-      updateProgressBar(session, "pb", value = 100, title = "Completed!")
-      
-      end_time <- Sys.time()
-      log_message("Total run time: %.3f sec", as.numeric(difftime(end_time, start_time, units = "secs")))
-      
-    }, error = function(e) {
-      log_message("Run failed: %s", e$message)
-      showModal(modalDialog(
-        title = "Prediction Error",
-        paste("An error occurred during prediction:", e$message),
-        easyClose = TRUE
-      ))
-    })
-  })
-  
-  # -------------------- Leaflet helpers & maps --------------------
-  observeEvent(o3_sf(), ignoreInit = TRUE, {
-    m <- o3_sf()
-    if (is.null(m)) {
-      reset_leaflet("o3_plot")
-      return()
-    }
-    
-    session$sendCustomMessage("markRenderStart", list(map_id = "o3_plot"))
+  observeEvent(o3_sf(), ignoreInit=TRUE, {
+    m <- o3_sf(); if (is.null(m)) { reset_leaflet("o3_plot"); return() }
+    session$sendCustomMessage("markRenderStart", list(map_id="o3_plot"))
     t0 <- Sys.time()
     update_leaflet_map("o3_plot", m, paste0("Ozone (", UNIT_O3_TEXT, ")"))
-    t1 <- Sys.time()
-    log_message("Server leaflet build: o3 = %.3f sec", as.numeric(difftime(t1, t0, units = "secs")))
-    session$sendCustomMessage("probeLeafletRender", list(map_id = "o3_plot"))
+    log_message("Server leaflet build: o3 = %.3f sec", as.numeric(difftime(Sys.time(), t0, units="secs")))
+    session$sendCustomMessage("probeLeafletRender", list(map_id="o3_plot"))
   })
   
-  observeEvent(pm_sf(), ignoreInit = TRUE, {
-    m <- pm_sf()
-    if (is.null(m)) {
-      reset_leaflet("pm_plot")
-      return()
-    }
-    
-    session$sendCustomMessage("markRenderStart", list(map_id = "pm_plot"))
+  observeEvent(pm_sf(), ignoreInit=TRUE, {
+    m <- pm_sf(); if (is.null(m)) { reset_leaflet("pm_plot"); return() }
+    session$sendCustomMessage("markRenderStart", list(map_id="pm_plot"))
     t0 <- Sys.time()
     update_leaflet_map("pm_plot", m, PM25_FULL_HTML)
-    t1 <- Sys.time()
-    log_message("Server leaflet build: pm = %.3f sec", as.numeric(difftime(t1, t0, units = "secs")))
-    session$sendCustomMessage("probeLeafletRender", list(map_id = "pm_plot"))
+    log_message("Server leaflet build: pm = %.3f sec", as.numeric(difftime(Sys.time(), t0, units="secs")))
+    session$sendCustomMessage("probeLeafletRender", list(map_id="pm_plot"))
   })
   
   observeEvent(input$leaflet_render_done, {
@@ -1200,124 +1046,98 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
   })
   
-  observeEvent(input$o3_plot_shape_click, ignoreInit = TRUE, {
-    id <- input$o3_plot_shape_click$id
-    req(id)
-    
-    rc <- strsplit(id, "_")[[1]]
-    r <- as.numeric(rc[1])
-    c <- as.numeric(rc[2])
-    
-    region <- mesh %>%
-      dplyr::filter(Row == r, Column == c) %>%
-      dplyr::pull(Region_Name) %>%
-      unique()
-    
-    req(length(region) > 0)
-    
-    p <- make_weight_plot(region[1], "o3")
-    popup <- plot_to_popup(p)
-    
-    leafletProxy("o3_plot") %>%
-      clearPopups() %>%
-      addPopups(
-        lng = input$o3_plot_shape_click$lng,
-        lat = input$o3_plot_shape_click$lat,
-        popup = popup,
-        options = popupOptions(maxWidth = 560)
+  # ── Weight popup ───────────────────────────────────────────────────────────
+  get_weight_top5 <- function(region, pollutant) {
+    df <- if (pollutant == "o3") O3_weight_summary else PM_weight_summary
+    df %>%
+      dplyr::filter(Target_Region == region) %>%
+      dplyr::arrange(desc(Weight_Ratio)) %>%
+      dplyr::slice_head(n=5) %>%
+      dplyr::mutate(
+        SectorFull = unname(sector_map[Input_Sector]),
+        SectorFull = ifelse(is.na(SectorFull), "Others", SectorFull),
+        Label      = paste(Input_Region, SectorFull, sep="\n"),
+        TextColor2 = ifelse(tolower(TextColor) == "red", "#FF0000", "#2E8B57")
       )
-  })
+  }
   
-  observeEvent(input$pm_plot_shape_click, ignoreInit = TRUE, {
-    id <- input$pm_plot_shape_click$id
-    req(id)
-    
-    rc <- strsplit(id, "_")[[1]]
-    r <- as.numeric(rc[1])
-    c <- as.numeric(rc[2])
-    
-    region <- mesh %>%
-      dplyr::filter(Row == r, Column == c) %>%
-      dplyr::pull(Region_Name) %>%
-      unique()
-    
+  make_weight_plot <- function(region, pollutant) {
+    df <- get_weight_top5(region, pollutant)
+    if (nrow(df) == 0) return(NULL)
+    top5_sum <- sum(df$Weight_Ratio, na.rm=TRUE)
+    xmax     <- max(df$Weight_Ratio, na.rm=TRUE) * 1.40
+    ggplot(df, aes(x=Weight_Ratio, y=reorder(Label, Weight_Ratio), fill=SectorFull)) +
+      geom_col(width=0.7, color="black") +
+      geom_text(aes(label=sprintf("%.1f%%", Weight_Ratio), color=TextColor2),
+                hjust=-0.08, size=5, show.legend=FALSE, fontface="bold") +
+      scale_fill_manual(values=sector_colors) + scale_color_identity() +
+      scale_x_continuous(limits=c(0,xmax), expand=expansion(mult=c(0,0.02))) +
+      labs(title=paste0(region), x="Ratio (%)", y="Region-Sector") +
+      annotate("label", x=xmax*0.95, y=0.56, label=sprintf("%.1f%%", top5_sum), size=5, fontface="bold") +
+      theme_bw(base_size=16) +
+      theme(legend.position="none",
+            plot.title=element_text(face="bold", hjust=0.5),
+            axis.title.x=element_text(face="bold"), axis.title.y=element_text(face="bold"),
+            axis.text.x=element_text(face="bold"),  axis.text.y=element_text(face="bold"),
+            panel.grid.major.y=element_blank())
+  }
+  
+  plot_to_popup <- function(plot_obj) {
+    if (is.null(plot_obj)) return(htmltools::HTML("<div>No data</div>"))
+    tmp <- tempfile(fileext=".png")
+    png(tmp, width=900, height=520, res=110); print(plot_obj); dev.off()
+    htmltools::HTML(paste0("<img src='", base64enc::dataURI(file=tmp, mime="image/png"), "' width='500px'>"))
+  }
+  
+  observeEvent(input$o3_plot_shape_click, ignoreInit=TRUE, {
+    id <- input$o3_plot_shape_click$id; req(id)
+    rc <- strsplit(id,"_")[[1]]; r <- as.numeric(rc[1]); c <- as.numeric(rc[2])
+    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% dplyr::pull(Region_Name) %>% unique()
     req(length(region) > 0)
-    
-    p <- make_weight_plot(region[1], "pm")
-    popup <- plot_to_popup(p)
-    
-    leafletProxy("pm_plot") %>%
-      clearPopups() %>%
-      addPopups(
-        lng = input$pm_plot_shape_click$lng,
-        lat = input$pm_plot_shape_click$lat,
-        popup = popup,
-        options = popupOptions(maxWidth = 560)
-      )
+    leafletProxy("o3_plot") %>% clearPopups() %>%
+      addPopups(lng=input$o3_plot_shape_click$lng, lat=input$o3_plot_shape_click$lat,
+                popup=plot_to_popup(make_weight_plot(region[1],"o3")), options=popupOptions(maxWidth=560))
   })
   
-  last_hover_o3 <- reactiveVal(NULL)
-  
-  observeEvent(input$o3_plot_shape_mouseover, {
-    id <- input$o3_plot_shape_mouseover$id
-    if (!identical(id, last_hover_o3())) {
-      last_hover_o3(id)
-    }
+  observeEvent(input$pm_plot_shape_click, ignoreInit=TRUE, {
+    id <- input$pm_plot_shape_click$id; req(id)
+    rc <- strsplit(id,"_")[[1]]; r <- as.numeric(rc[1]); c <- as.numeric(rc[2])
+    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% dplyr::pull(Region_Name) %>% unique()
+    req(length(region) > 0)
+    leafletProxy("pm_plot") %>% clearPopups() %>%
+      addPopups(lng=input$pm_plot_shape_click$lng, lat=input$pm_plot_shape_click$lat,
+                popup=plot_to_popup(make_weight_plot(region[1],"pm")), options=popupOptions(maxWidth=560))
   })
   
-  last_hover_pm <- reactiveVal(NULL)
-  
-  observeEvent(input$pm_plot_shape_mouseover, {
-    id <- input$pm_plot_shape_mouseover$id
-    if (!identical(id, last_hover_pm())) {
-      last_hover_pm(id)
-    }
-  })
-  
+  # ── Text outputs ───────────────────────────────────────────────────────────
   output$o3_mean <- renderText({
-    m <- o3_sf()
-    req(!is.null(m))
-    paste0("Annual average across all cells: ",
-           sprintf("%.1f %s", mean(m$Year, na.rm = TRUE), UNIT_O3_TEXT))
+    m <- o3_sf(); req(!is.null(m))
+    paste0("Annual average across all cells: ", sprintf("%.1f %s", mean(m$Year, na.rm=TRUE), UNIT_O3_TEXT))
   })
-  
   output$o3_summary <- renderText({
-    m <- o3_sf()
-    req(!is.null(m))
-    rng <- range(m$Year, na.rm = TRUE)
-    paste0("Annual range across all cells: ",
-           sprintf("%.1f – %.1f %s", rng[1], rng[2], UNIT_O3_TEXT))
+    m <- o3_sf(); req(!is.null(m)); rng <- range(m$Year, na.rm=TRUE)
+    paste0("Annual range across all cells: ", sprintf("%.1f - %.1f %s", rng[1], rng[2], UNIT_O3_TEXT))
   })
-  
   output$pm_mean <- renderText({
-    m <- pm_sf()
-    req(!is.null(m))
-    paste0("Annual average across all cells: ",
-           sprintf("%.1f %s", mean(m$Year, na.rm = TRUE), UNIT_PM_TEXT))
+    m <- pm_sf(); req(!is.null(m))
+    paste0("Annual average across all cells: ", sprintf("%.1f %s", mean(m$Year, na.rm=TRUE), UNIT_PM_TEXT))
   })
-  
   output$pm_summary <- renderText({
-    m <- pm_sf()
-    req(!is.null(m))
-    rng <- range(m$Year, na.rm = TRUE)
-    paste0("Annual range across all cells: ",
-           sprintf("%.1f – %.1f %s", rng[1], rng[2], UNIT_PM_TEXT))
+    m <- pm_sf(); req(!is.null(m)); rng <- range(m$Year, na.rm=TRUE)
+    paste0("Annual range across all cells: ", sprintf("%.1f - %.1f %s", rng[1], rng[2], UNIT_PM_TEXT))
   })
   
-  # -------------------- Downloads --------------------
+  # ── Downloads ──────────────────────────────────────────────────────────────
   output$dl_scenario <- downloadHandler(
     filename = function() paste0("control_scenario_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
     content  = function(file) {
-      m  <- vals()
-      df <- as.data.frame(m, check.names = FALSE)
-      df_out <- cbind(Region = rownames(df), df)
-      utils::write.csv(df_out, file, row.names = FALSE, na = "")
+      m <- vals(); df <- as.data.frame(m, check.names=FALSE)
+      utils::write.csv(cbind(Region=rownames(df), df), file, row.names=FALSE, na="")
     }
   )
-  
   output$dl_results <- downloadHandler(
     filename = function() paste0("prediction_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds"),
-    content  = function(file) { saveRDS(result_store(), file) }
+    content  = function(file) saveRDS(result_store(), file)
   )
 }
 
