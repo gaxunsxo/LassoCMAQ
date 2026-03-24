@@ -250,7 +250,7 @@ ui <- page_fluid(
                             h5("What Is This", class="fw-bold mb-2"),
                             tags$ul(
                               tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using LASSO with an adaptive logit transformation."),
-                              tags$li("It estimates Ozone or PM2.5 concentrations from regional emission-control scenarios in about 10 seconds each.")
+                              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each.")
                             )
                           )
                      ),
