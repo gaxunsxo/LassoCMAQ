@@ -9,6 +9,11 @@ suppressPackageStartupMessages({
   library(waiter)
   library(shinyWidgets)
   library(leaflet)
+  library(ggplot2)
+  library(base64enc)
+  library(scales)
+  library(RColorBrewer)
+  library(filelock)
 })
 
 # -------------------- Constants --------------------
@@ -17,6 +22,26 @@ region_names <- c(
   "Chungnam","Gyeongbuk","Gyeongnam","Jeonbuk","Jeonnam","Jeju","Daejeon","Ulsan","Sejong"
 )
 factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
+
+# -------------------- Global execution lock --------------------
+LOCK_PATH <- "/tmp/lassocmaq_prediction.lock"
+
+acquire_global_lock <- function(timeout = 0) {
+  dir.create(dirname(LOCK_PATH), recursive = TRUE, showWarnings = FALSE)
+  
+  if (!file.exists(LOCK_PATH)) {
+    ok <- file.create(LOCK_PATH)
+    if (!ok) stop("Failed to create lock file.")
+  }
+  
+  filelock::lock(LOCK_PATH, timeout = timeout)
+}
+
+release_global_lock <- function(lock_obj) {
+  if (!is.null(lock_obj)) {
+    try(filelock::unlock(lock_obj), silent = TRUE)
+  }
+}
 
 # ------------------ Units & Labels ------------------
 # O3
@@ -34,15 +59,15 @@ PM25_FULL_TEXT <- paste0(PM25_LABEL_TEXT, " (", UNIT_PM_TEXT, ")")
 PM25_FULL_HTML <- paste0(PM25_LABEL_HTML, " (", UNIT_PM_HTML, ")")
 
 # -------------------- Load spatial & model objects --------------------
-asia_map <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Asia_county_map.shp", quiet = TRUE)
-mesh     <- st_read("/home/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp", quiet = TRUE)
+asia_map <- st_read("/ext_hdd_data1/geseo/LassoCMAQ_Data/Mapping_shp/Asia_county_map.shp", quiet = TRUE)
+mesh     <- st_read("/ext_hdd_data1/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp", quiet = TRUE)
 st_crs(asia_map) <- 4326
 st_crs(mesh) <- 4326
 asia_map <- st_make_valid(asia_map)
 mesh     <- st_make_valid(mesh)
 
 # -------------------- Load region map --------------------
-region_map <- read.csv("/home/geseo/LassoCMAQ_Data/Grid-based Regional Allocation Ratio for 17 Municipalities_UPDATED.csv")
+region_map <- read.csv("/ext_hdd_data1/geseo/LassoCMAQ_Data/Grid-based Regional Allocation Ratio for 17 Municipalities_UPDATED.csv")
 region_map_clean <- region_map %>%
   group_by(Column, Row) %>%
   slice_max(order_by = X., n = 1, with_ties = FALSE) %>%
@@ -67,18 +92,51 @@ region_outline <- mesh %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   st_make_valid()
 
+# -------------------- Load weight summary --------------------
+O3_weight_summary <- read.csv(
+  "/ext_hdd_data1/geseo/LassoCMAQ_Data/O3_Weight_Summary.csv",
+  stringsAsFactors = FALSE
+)
+
+PM_weight_summary <- read.csv(
+  "/ext_hdd_data1/geseo/LassoCMAQ_Data/PM_Weight_Summary.csv",
+  stringsAsFactors = FALSE
+)
+
+# -------------------- Sector mapping --------------------
+sector_map <- c(
+  "POW" = "Power",
+  "IND" = "Industry",
+  "MO"  = "Mobile",
+  "RE"  = "Residential",
+  "ARG"  = "Agriculture",
+  "SOL" = "Solvent",
+  "OTH" = "Others"
+)
+
+sector_colors <- c(
+  "Power"       = "#D3D3E8",
+  "Industry"    = "#FFC300",
+  "Industrial"  = "#FFC300",
+  "Mobile"      = "#FFFFB3",
+  "Residential" = "#A2D9CE",
+  "Agriculture" = "#E3B8EA",
+  "Solvent"     = "#FF9999",
+  "Others"      = "#C2B280"
+)
+
 # -------------------- Load model objects --------------------
 # Ozone
-load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
-load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
-load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_ADAPT.RData")
-load("/home/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_ADAPT.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
 
 # PM2.5
-load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
-load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
-load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_BIAS.RData")
-load("/home/geseo/LassoCMAQ_Data/PM/Total/PM_ADAPT.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_BIAS.RData")
+load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_ADAPT.RData")
 
 # -------------------- Theme & CSS --------------------
 theme <- bs_theme(
@@ -195,6 +253,12 @@ ui <- page_fluid(
     tags$title("LassoCMAQ"),
     tags$style(custom_css),
     tags$script(HTML("
+      document.addEventListener('DOMContentLoaded', function() {
+        window.scrollTo(0, 0);
+      });
+      $(document).on('shiny:connected', function() {
+        window.scrollTo(0, 0);
+      });
       window.__leafletRenderStart = {};
       Shiny.addCustomMessageHandler('markRenderStart', function(msg) {
         window.__leafletRenderStart[msg.map_id] = performance.now();
@@ -216,6 +280,30 @@ ui <- page_fluid(
           });
         });
       });
+      
+      window.__policyScroll = { pageY: 0, tableY: 0 };
+
+      Shiny.addCustomMessageHandler('savePolicyScroll', function(msg) {
+        window.__policyScroll.pageY = window.scrollY || window.pageYOffset || 0;
+
+        var body = document.querySelector('#policy_dt .dataTables_scrollBody');
+        if (body) {
+          window.__policyScroll.tableY = body.scrollTop || 0;
+        } else {
+          window.__policyScroll.tableY = 0;
+        }
+      });
+
+      Shiny.addCustomMessageHandler('restorePolicyScroll', function(msg) {
+        setTimeout(function() {
+          window.scrollTo(0, window.__policyScroll.pageY || 0);
+
+          var body = document.querySelector('#policy_dt .dataTables_scrollBody');
+          if (body) {
+            body.scrollTop = window.__policyScroll.tableY || 0;
+          }
+        }, 0);
+      });
     "))
   ),
   
@@ -229,7 +317,7 @@ ui <- page_fluid(
                                                 div(class="d-flex align-items-center justify-content-between",
                                                     div(class="d-flex gap-3",
                                                         tags$a(href="#home",     class="link-dark text-decoration-none", "Home"),
-                                                        tags$a(href="#control",  class="link-dark text-decoration-none", "Control Policy"),
+                                                        tags$a(href="#control",  class="link-dark text-decoration-none", "Control Scenario"),
                                                         tags$a(href="#outputs",  class="link-dark text-decoration-none", "Results"),
                                                         tags$a(href="#download", class="link-dark text-decoration-none", "Download")
                                                     )
@@ -247,21 +335,21 @@ ui <- page_fluid(
       layout_columns(col_widths = c(4,4,4),
                      card(class = "section-block",
                           card_body(
-                            h5("What Is This", class="fw-bold mb-2"),
+                            h5("What Is LassoCMAQ", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("LassoCMAQ is a computationally efficient surrogate for CMAQ, developed using LASSO with an adaptive logit transformation."),
-                              tags$li("It estimates Ozone or PM₂.₅ concentrations from regional emission-control scenarios in about 10 seconds each.")
+                              tags$li("LassoCMAQ is a computationally efficient reduced-form CMAQ model, developed using the least absolute shrinkage and selection operator (LASSO) together with an adaptive logit transformation of the response variable."),
+                              tags$li("It estimates ozone and PM₂.₅ concentrations from regional emission-control scenarios in about 30 seconds per scenario. The model computes concentrations for every grid cell at every hour, enabling rapid what-if exploration without running CMAQ.")
                             )
                           )
                      ),
                      card(class = "section-block",
                           card_body(
-                            h5("How to Use", class="fw-bold mb-2"),
+                            h5("How to Use LassoCMAQ", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("1. Enter a 17 × 7 control policy matrix (Region × Source)."),
-                              tags$li("2. Select pollutant(s) and click Run."),
-                              tags$li("3. Inspect maps and summary metrics; adjust and rerun."),
-                              tags$li("4. Download results as needed.")
+                              tags$li("1. Enter a 17 × 7 emission scenario matrix (Region × Emission Sector) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline)."),
+                              tags$li("2. Select pollutant(s) and click Run to estimate CMAQ-equivalent concentrations for the selected scenario."),
+                              tags$li("3. Inspect maps and summary metrics; click a grid cell to view the top five influential variables for the corresponding region."),
+                              tags$li("4. Download the scenario inputs and the full model results as needed.")
                             )
                           )
                      ),
@@ -269,7 +357,7 @@ ui <- page_fluid(
                           card_body(
                             h5("Citation", class="fw-bold mb-2"),
                             tags$blockquote(
-                              "D.-B. Lee et al., Development of a fast and interpretable machine learning emulator for CMAQ: application to ozone and PM2.5 policy support (submitted)"
+                              "D.-B. Lee et al., A LASSO-based reduced-form CMAQ model for predicting ozone and PM2.5 responses to emission changes in South Korea (submitted)"
                             )
                           )
                      )
@@ -277,39 +365,38 @@ ui <- page_fluid(
   ),
   
   div(id="control", class="section",
-      h3("Control Policy", class = "fw-semibold mb-2"),
+      h3("Control Scenario", class = "fw-semibold mb-2"),
       card(class = "section-block", style = "width:40%",
            card_body(
-             h5("How to Set a Control Policy", class = "fw-bold mb-2"),
+             h5("How to Set an Emission Scenario", class = "fw-bold mb-2"),
              tags$ul(
-               tags$li("Use the control policy matrix to define emission change ratios."),
+               tags$li("Use the emission scenario matrix to define emission change ratios. Each cell represents an emission change ratio (Region × Emission Sector)."),
                tags$ul(
-                 tags$li("Each cell = emission change ratio (Region × Source)."),
                  tags$li("Edit cells directly."),
                  tags$li("Update all cells at once."),
                  tags$li("Update a row or column at once."),
-                 tags$li("Upload a control policy file.")
+                 tags$li("Upload an emission scenario file.")
                )
              )
            )
       ),
       layout_columns(col_widths = c(9,3),
                      div(
-                       card(header="Policy Table (17 × 7)", class="section-block custom-table",
+                       card(header="Scenario Table (17 × 7)", class="section-block custom-table",
                             DTOutput("policy_dt", width = "100%")
                        )
                      ),
                      div(
-                       card(header="Upload a control policy file (.csv)", class="section-block card-upload",
-                            tags$label("Upload a control policy file (.csv)", class = "form-label fw-semibold"),
+                       card(header="Upload a control scenario file (.csv)", class="section-block card-upload",
+                            tags$label("Upload a control scenario file (.csv)", class = "form-label fw-semibold"),
                             tags$small("Example: ",
-                                       tags$a(href = "sample_policy.csv", "sample_policy.csv", download = NA)
+                                       tags$a(href = "sample_scenario.csv", "sample_scenario.csv", download = NA)
                             ),
-                            fileInput("policy_upload", NULL, buttonLabel="Upload", accept = ".csv")
+                            fileInput("scenario_upload", NULL, buttonLabel="Upload", accept = ".csv")
                        ),
                        card(header="Run Prediction", class="section-block card-compact",
                             checkboxGroupInput("pollutants","Select pollutant(s)",
-                                               choices = c("Ozone" = "o3", "PM2.5" = "pm25"),
+                                               choices = c("Ozone" = "o3", "PM₂.₅" = "pm25"),
                                                selected = c("o3","pm25")),
                             actionButton("btn_run","Run", class="btn btn-outline-primary btn-sm w-100")
                        )
@@ -332,7 +419,7 @@ ui <- page_fluid(
                           )
                      ),
                      card(class = "section-block",
-                          h4("PM2.5", class = "fw-bold mb-3"),
+                          h4(HTML("PM<sub>2.5</sub>"), class = "fw-bold mb-3"),
                           leafletOutput("pm_plot", height = "680px") %>% withSpinner(),
                           layout_columns(col_widths = c(6, 6),
                                          card(header = "Grid Average", textOutput("pm_mean")),
@@ -345,8 +432,8 @@ ui <- page_fluid(
   div(id="download", class="section",
       h3("Download", class = "fw-semibold mb-2"),
       layout_columns(col_widths = c(6,6),
-                     card(header="Control Policy",
-                          downloadButton("dl_policy", "Download current control policy (.csv)",
+                     card(header="Control Scenario",
+                          downloadButton("dl_scenario", "Download current control scenario (.csv)",
                                          class="btn btn-outline-primary", style="font-size:16px")
                      ),
                      card(header="Result File",
@@ -361,8 +448,13 @@ ui <- page_fluid(
 
 # -------------------- Server --------------------
 server <- function(input, output, session) {
+  # -------------------- Session --------------------
+  is_running <- reactiveVal(FALSE)
+  observe({
+    shinyjs::toggleState("btn_run", condition = !is_running())
+  })
   
-  # -------------------- Logging --------------------
+  # Logging 
   log_file <- "run.log"
   log_message <- function(fmt, ...) {
     ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
@@ -384,6 +476,12 @@ server <- function(input, output, session) {
     matrix(1, nrow = length(region_names), ncol = length(factor_names),
            dimnames = list(region_names, factor_names))
   })
+  
+  preserve_policy_scroll <- function(expr) {
+    session$sendCustomMessage("savePolicyScroll", list())
+    on.exit(session$sendCustomMessage("restorePolicyScroll", list()), add = TRUE)
+    force(expr)
+  }
   
   # ---- DT helpers ----
   to_numeric_matrix <- function(df) {
@@ -507,6 +605,8 @@ function bindRowInputs(api){
            });
            return;
          }
+         
+         Shiny.setInputValue('js_save_scroll', {nonce: Math.random()});
          Shiny.setInputValue('cell_edit', {row: row, col: col, val: val, nonce: Math.random()});
        });
 }
@@ -565,6 +665,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     )
   })
   
+  observeEvent(input$js_save_scroll, {
+    session$sendCustomMessage("savePolicyScroll", list())
+  })
+  
   observeEvent(input$cell_edit, {
     info <- input$cell_edit
     i <- as.integer(info$row)
@@ -581,7 +685,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     v <- as.numeric(info$val)
     if (is.finite(v) && j >= 1 && j <= ncol(vals())) {
       m <- vals(); m[, j] <- v; vals(m)
-      replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      preserve_policy_scroll({
+        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      })
     }
   })
   
@@ -591,7 +697,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     v <- as.numeric(info$val)
     if (is.finite(v) && i >= 1 && i <= nrow(vals())) {
       m <- vals(); m[i, ] <- v; vals(m)
-      replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      preserve_policy_scroll({
+        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      })
     }
   })
   
@@ -599,21 +707,23 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     v <- as.numeric(input$all_apply$val)
     if (is.finite(v)) {
       m <- vals(); m[,] <- v; vals(m)
-      replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      preserve_policy_scroll({
+        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      })
     }
   })
   
   # Upload policy
-  observeEvent(input$policy_upload, {
-    req(input$policy_upload)
-    ext <- tolower(tools::file_ext(input$policy_upload$name))
+  observeEvent(input$scenario_upload, {
+    req(input$scenario_upload)
+    ext <- tolower(tools::file_ext(input$scenario_upload$name))
     if (ext != "csv") {
       showModal(modalDialog(title = "Upload Error", "Only CSV files are allowed.", easyClose = TRUE))
       return()
     }
     
     tryCatch({
-      df <- read.csv(input$policy_upload$datapath, row.names = 1, check.names = FALSE)
+      df <- read.csv(input$scenario_upload$datapath, row.names = 1, check.names = FALSE)
       
       if (!setequal(rownames(df), region_names) || !setequal(colnames(df), factor_names)) {
         showModal(modalDialog(
@@ -634,7 +744,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       }
       
       vals(m)
-      replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      preserve_policy_scroll({
+        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
+      })
       
     }, error = function(e) {
       showModal(modalDialog(title = "Upload Error", paste("Failed to apply policy:", e$message), easyClose = TRUE))
@@ -729,6 +841,97 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   o3_sf <- reactiveVal(NULL)
   pm_sf <- reactiveVal(NULL)
   
+  # -------------------- Weight popup helpers --------------------
+  get_weight_top5 <- function(region, pollutant) {
+    
+    df <- if (pollutant == "o3") O3_weight_summary else PM_weight_summary
+    
+    out <- df %>%
+      dplyr::filter(Target_Region == region) %>%
+      dplyr::arrange(desc(Weight_Ratio)) %>%
+      dplyr::slice_head(n = 5) %>%
+      dplyr::mutate(
+        SectorFull = unname(sector_map[Input_Sector]),
+        SectorFull = ifelse(is.na(SectorFull), "Others", SectorFull),
+        Label = paste(Input_Region, SectorFull, sep = "\n"),
+        TextColor2 = ifelse(tolower(TextColor) == "red", "#FF0000", "#2E8B57")
+      )
+    
+    out
+  }
+  
+  make_weight_plot <- function(region, pollutant) {
+    
+    df <- get_weight_top5(region, pollutant)
+    if (nrow(df) == 0) return(NULL)
+    
+    top5_sum <- sum(df$Weight_Ratio, na.rm = TRUE)
+    xmax <- max(df$Weight_Ratio, na.rm = TRUE) * 1.40
+    
+    ggplot(
+      df,
+      aes(
+        x = Weight_Ratio,
+        y = reorder(Label, Weight_Ratio),
+        fill = SectorFull
+      )
+    ) +
+      geom_col(width = 0.7, color = "black") +
+      geom_text(
+        aes(
+          label = sprintf("%.1f%%", Weight_Ratio),
+          color = TextColor2
+        ),
+        hjust = -0.08,
+        size = 5,
+        show.legend = FALSE,
+        fontface = "bold"
+      ) +
+      scale_fill_manual(values = sector_colors) +
+      scale_color_identity() +
+      scale_x_continuous(
+        limits = c(0, xmax),
+        expand = expansion(mult = c(0, 0.02))
+      ) +
+      labs(
+        title = paste0(region),
+        x = "Ratio (%)",
+        y = "Region-Sector"
+      ) +
+      annotate(
+        "label",
+        x = xmax * 0.95,
+        y = 0.56,
+        label = sprintf("%.1f%%", top5_sum),
+        size = 5,
+        fontface = "bold"
+      ) +
+      theme_bw(base_size = 16) +
+      theme(
+        legend.position = "none",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        panel.grid.major.y = element_blank()
+      )
+  }
+  
+  plot_to_popup <- function(plot_obj) {
+    if (is.null(plot_obj)) return(htmltools::HTML("<div>No data</div>"))
+    
+    tmp <- tempfile(fileext = ".png")
+    png(tmp, width = 900, height = 520, res = 110)
+    print(plot_obj)
+    dev.off()
+    
+    img <- base64enc::dataURI(file = tmp, mime = "image/png")
+    htmltools::HTML(
+      paste0("<img src='", img, "' width='500px'>")
+    )
+  }
+  
   # -------------------- Run prediction --------------------
   init_leaflet <- function() {
     leaflet(options = leafletOptions(preferCanvas = FALSE)) %>%
@@ -740,19 +943,18 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         color = "#444444",
         weight = 1,
         opacity = 0.9,
-        group = "boundary"
+        group = "boundary",
+        options = pathOptions(interactive = FALSE)
       )
   }
   
   reset_leaflet <- function(map_id) {
     leafletProxy(map_id) %>%
       clearGroup("mesh") %>%
+      clearGroup("mesh_boundary") %>%
       clearControls() %>%
+      clearPopups() %>%
       setView(lng = 127.8, lat = 36.2, zoom = 6)
-  }
-  
-  blend_white_red <- function(x, alpha = 0.6) {
-    rgb(1, 1 - alpha * x, 1 - alpha * x)
   }
   
   make_red_pal <- function(x) {
@@ -792,7 +994,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     
     leafletProxy(map_id, data = m) %>%
       clearGroup("mesh") %>%
+      clearGroup("mesh_boundary") %>%
       clearControls() %>%
+      clearPopups() %>%
       fitBounds(
         lng1 = bb["xmin"],
         lat1 = bb["ymin"],
@@ -807,7 +1011,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         group = "mesh",
         layerId = ~paste0(Row, "_", Column),
         label = ~sprintf(
-          "Region: %s\nValue: %.2f",
+          "Region: %s, Value: %.1f",
           Region_Name,
           Year
         ),
@@ -831,7 +1035,8 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         color = "#777777",
         weight = 0.12,
         opacity = 0.6,
-        group = "mesh_boundary"
+        group = "mesh_boundary",
+        options = pathOptions(interactive = FALSE)
       ) %>%
       addLegend(
         pal = pal_rev,
@@ -843,87 +1048,120 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
           transform = function(x) sort(x, decreasing = TRUE)
         )
       )
-    
   }
   
   output$o3_plot <- renderLeaflet(init_leaflet())
   output$pm_plot <- renderLeaflet(init_leaflet())
   
   observeEvent(input$btn_run, {
-    
     runjs("document.getElementById('outputs').scrollIntoView({behavior:'smooth', block:'start'});")
     req(input$pollutants)
     
-    start_time <- Sys.time()
-    log_message("Run clicked: start prediction")
+    lock_obj <- NULL
     
-    w$show()
-    updateProgressBar(session, "pb", value = 0,  title = "Initializing...")
-    updateProgressBar(session, "pb", value = 5,  title = "Validating input...")
-    
-    m <- vals()
-    if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); w$hide(); return() }
-    if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
-      showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); w$hide(); return()
-    }
-    
-    control_vec <- as.numeric(t(m))
-    need_o3 <- "o3" %in% input$pollutants
-    need_pm <- "pm25" %in% input$pollutants
-    
-    store <- list(o3=NULL, pm=NULL)
-    
-    if (need_o3) {
-      updateProgressBar(session, "pb", value = 20, title = "Running Ozone prediction...")
-      t1 <- Sys.time()
-      store$o3 <- predict_with_model_fast(control_vec, models$o3, "o3")
-      t2 <- Sys.time()
-      log_message("Ozone total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+    tryCatch({
+      # -------------------- Global lock acquire --------------------
+      lock_obj <- acquire_global_lock(timeout = 0)
       
-      t3 <- Sys.time()
-      m_o3 <- mesh
-      m_o3$Year <- month_means_fast(store$o3)
-      m_o3 <- st_make_valid(m_o3)
-      o3_sf(m_o3)
-      t4 <- Sys.time()
-      log_message("Ozone mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
+      if (is.null(lock_obj)) {
+        showModal(modalDialog(
+          title = "Prediction Busy",
+          "Another user is currently running a prediction. Please try again after the current run finishes.",
+          easyClose = TRUE
+        ))
+        log_message("Run rejected: another user already holds the global lock")
+        return()
+      }
       
-      updateProgressBar(session, "pb", value = if (need_pm) 45 else 80, title = "Ozone prediction finished")
-    } else {
-      o3_sf(NULL)
-    }
-    
-    if (need_pm) {
-      updateProgressBar(
-        session, "pb",
-        value = if (need_o3) 50 else 20,
-        title = paste0("Running ", PM25_LABEL_TEXT, " prediction...")
-      )
+      on.exit({
+        release_global_lock(lock_obj)
+        log_message("Global lock released")
+      }, add = TRUE)
       
-      t1 <- Sys.time()
-      store$pm <- predict_with_model_fast(control_vec, models$pm, "pm")
-      t2 <- Sys.time()
-      log_message("PM2.5 total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+      start_time <- Sys.time()
+      log_message("Run clicked: start prediction (global lock acquired)")
       
-      t3 <- Sys.time()
-      m_pm <- mesh
-      m_pm$Year <- month_means_fast(store$pm)
-      m_pm <- st_make_valid(m_pm)
-      pm_sf(m_pm)
-      t4 <- Sys.time()
-      log_message("PM2.5 mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
+      w$show()
+      on.exit(w$hide(), add = TRUE)
       
-      updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = paste0(PM25_LABEL_TEXT, " prediction finished"))
-    } else {
-      pm_sf(NULL)
-    }
-    
-    result_store(store)
-    updateProgressBar(session, "pb", value = 100, title = "Completed!")
-    w$hide()
-    
-    end_time <- Sys.time()
-    log_message("Total run time: %.3f sec", as.numeric(difftime(end_time, start_time, units = "secs")))
+      updateProgressBar(session, "pb", value = 0,  title = "Initializing...")
+      updateProgressBar(session, "pb", value = 5,  title = "Validating input...")
+      
+      m <- vals()
+      if (any(!is.finite(m))) {
+        showModal(modalDialog("All cells must be numeric.", easyClose = TRUE))
+        return()
+      }
+      if (any(m < 0.5 | m > 1.5, na.rm = TRUE)) {
+        showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose = TRUE))
+        return()
+      }
+      
+      control_vec <- as.numeric(t(m))
+      need_o3 <- "o3" %in% input$pollutants
+      need_pm <- "pm25" %in% input$pollutants
+      
+      store <- list(o3 = NULL, pm = NULL)
+      
+      if (need_o3) {
+        updateProgressBar(session, "pb", value = 20, title = "Running Ozone prediction...")
+        t1 <- Sys.time()
+        store$o3 <- predict_with_model_fast(control_vec, models$o3, "o3")
+        t2 <- Sys.time()
+        log_message("Ozone total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+        
+        t3 <- Sys.time()
+        m_o3 <- mesh
+        m_o3$Year <- month_means_fast(store$o3)
+        m_o3 <- st_make_valid(m_o3)
+        o3_sf(m_o3)
+        t4 <- Sys.time()
+        log_message("Ozone mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
+        
+        updateProgressBar(session, "pb", value = if (need_pm) 45 else 80, title = "Ozone prediction finished")
+      } else {
+        o3_sf(NULL)
+      }
+      
+      if (need_pm) {
+        updateProgressBar(
+          session, "pb",
+          value = if (need_o3) 50 else 20,
+          title = paste0("Running ", PM25_LABEL_TEXT, " prediction...")
+        )
+        
+        t1 <- Sys.time()
+        store$pm <- predict_with_model_fast(control_vec, models$pm, "pm")
+        t2 <- Sys.time()
+        log_message("PM2.5 total(pred+post): %.3f sec", as.numeric(difftime(t2, t1, units = "secs")))
+        
+        t3 <- Sys.time()
+        m_pm <- mesh
+        m_pm$Year <- month_means_fast(store$pm)
+        m_pm <- st_make_valid(m_pm)
+        pm_sf(m_pm)
+        t4 <- Sys.time()
+        log_message("PM2.5 mean+sf attach: %.3f sec", as.numeric(difftime(t4, t3, units = "secs")))
+        
+        updateProgressBar(session, "pb", value = if (need_o3) 75 else 80, title = paste0(PM25_LABEL_TEXT, " prediction finished"))
+      } else {
+        pm_sf(NULL)
+      }
+      
+      result_store(store)
+      updateProgressBar(session, "pb", value = 100, title = "Completed!")
+      
+      end_time <- Sys.time()
+      log_message("Total run time: %.3f sec", as.numeric(difftime(end_time, start_time, units = "secs")))
+      
+    }, error = function(e) {
+      log_message("Run failed: %s", e$message)
+      showModal(modalDialog(
+        title = "Prediction Error",
+        paste("An error occurred during prediction:", e$message),
+        easyClose = TRUE
+      ))
+    })
   })
   
   # -------------------- Leaflet helpers & maps --------------------
@@ -960,6 +1198,62 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   observeEvent(input$leaflet_render_done, {
     info <- input$leaflet_render_done
     log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
+  })
+  
+  observeEvent(input$o3_plot_shape_click, ignoreInit = TRUE, {
+    id <- input$o3_plot_shape_click$id
+    req(id)
+    
+    rc <- strsplit(id, "_")[[1]]
+    r <- as.numeric(rc[1])
+    c <- as.numeric(rc[2])
+    
+    region <- mesh %>%
+      dplyr::filter(Row == r, Column == c) %>%
+      dplyr::pull(Region_Name) %>%
+      unique()
+    
+    req(length(region) > 0)
+    
+    p <- make_weight_plot(region[1], "o3")
+    popup <- plot_to_popup(p)
+    
+    leafletProxy("o3_plot") %>%
+      clearPopups() %>%
+      addPopups(
+        lng = input$o3_plot_shape_click$lng,
+        lat = input$o3_plot_shape_click$lat,
+        popup = popup,
+        options = popupOptions(maxWidth = 560)
+      )
+  })
+  
+  observeEvent(input$pm_plot_shape_click, ignoreInit = TRUE, {
+    id <- input$pm_plot_shape_click$id
+    req(id)
+    
+    rc <- strsplit(id, "_")[[1]]
+    r <- as.numeric(rc[1])
+    c <- as.numeric(rc[2])
+    
+    region <- mesh %>%
+      dplyr::filter(Row == r, Column == c) %>%
+      dplyr::pull(Region_Name) %>%
+      unique()
+    
+    req(length(region) > 0)
+    
+    p <- make_weight_plot(region[1], "pm")
+    popup <- plot_to_popup(p)
+    
+    leafletProxy("pm_plot") %>%
+      clearPopups() %>%
+      addPopups(
+        lng = input$pm_plot_shape_click$lng,
+        lat = input$pm_plot_shape_click$lat,
+        popup = popup,
+        options = popupOptions(maxWidth = 560)
+      )
   })
   
   last_hover_o3 <- reactiveVal(NULL)
@@ -1011,8 +1305,8 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   })
   
   # -------------------- Downloads --------------------
-  output$dl_policy <- downloadHandler(
-    filename = function() paste0("control_policy_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+  output$dl_scenario <- downloadHandler(
+    filename = function() paste0("control_scenario_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
     content  = function(file) {
       m  <- vals()
       df <- as.data.frame(m, check.names = FALSE)
