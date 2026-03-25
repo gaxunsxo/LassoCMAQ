@@ -21,14 +21,12 @@ suppressPackageStartupMessages({
 plan(multisession, workers = 1)
 
 # -------------------- Constants --------------------
-# UI 표시 순서
 region_names <- c(
   "Incheon","Gyeonggi","Seoul","Gangwon","Chungbuk","Sejong","Daejeon",
   "Chungnam","Gyeongbuk","Daegu","Ulsan","Busan","Gyeongnam","Jeonbuk","Gwangju","Jeonnam","Jeju"
 )
 factor_names <- c("Power","Industry","Residential","Solvent","Mobile","Agriculture","Others")
 
-# 모델 입력 순서
 region_names_model <- c(
   "Seoul","Incheon","Busan","Daegu","Gwangju","Gyeonggi","Gangwon","Chungbuk",
   "Chungnam","Gyeongbuk","Gyeongnam","Jeonbuk","Jeonnam","Jeju","Daejeon","Ulsan","Sejong"
@@ -80,9 +78,9 @@ release_global_lock <- function(lock_obj) {
 UNIT_O3_TEXT  <- "ppb"
 O3_LABEL_TEXT <- "Ozone"
 
-# PM2.5
-PM25_LABEL_TEXT <- "PM<sub>2.5</sub>"
-PM25_LABEL_HTML <- "PM<sub>2.5</sub>"
+# PM₂.₅ 
+PM25_LABEL_TEXT <- "PM₂.₅"
+PM25_LABEL_HTML <- "PM₂.₅"
 
 UNIT_PM_TEXT <- "µg/m³"
 UNIT_PM_HTML <- "&micro;g/m<sup>3</sup>"
@@ -163,7 +161,7 @@ load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData"
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_ADAPT.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
 
-# PM2.5
+# PM₂.₅ 
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_BIAS.RData")
@@ -384,7 +382,7 @@ ui <- page_fluid(
                           card_body(
                             h5("Citation", class="fw-bold mb-2"),
                             tags$blockquote(
-                              "D.-B. Lee et al., A LASSO-based reduced-form CMAQ model for predicting ozone and PM2.5 responses to emission changes in South Korea (submitted)"
+                              "D.-B. Lee et al., A LASSO-based reduced-form CMAQ model for predicting ozone and PM₂.₅ responses to emission changes in South Korea (submitted)"
                             )
                           )
                      )
@@ -434,7 +432,7 @@ ui <- page_fluid(
   div(id = "outputs", class = "section",
       h3("Results", class = "fw-semibold mb-2"),
       div(style = "width:60%; margin-left:0; margin-top: 15px",
-          progressBar(id = "pb", value = 0, total = 100, display_pct = TRUE, striped = TRUE, status = "primary")
+          progressBar(id = "pb", value = 0, display_pct = TRUE, striped = TRUE, status = "primary")
       ),
       layout_columns(col_widths = c(6, 6),
                      card(class = "section-block",
@@ -446,7 +444,7 @@ ui <- page_fluid(
                           )
                      ),
                      card(class = "section-block",
-                          h4(HTML("PM<sub>2.5</sub>"), class = "fw-bold mb-3"),
+                          h4(HTML("PM₂.₅"), class = "fw-bold mb-3"),
                           leafletOutput("pm_plot", height = "680px") %>% withSpinner(),
                           layout_columns(col_widths = c(6, 6),
                                          card(header = "Grid Average", textOutput("pm_mean")),
@@ -552,7 +550,7 @@ server <- function(input, output, session) {
     as.character(
       tags$div(class = "cell-wrapper",
                tags$input(type = "number", step = "0.1", min = "0.5", max = "1.5",
-                          value = formatC(value, format = "f", digits = 1),
+                          value = if (value == 1) "1.0" else format(value, trim = TRUE),
                           class = "form-control form-control-sm cell-input",
                           `data-row` = i, `data-col` = j)
       )
@@ -821,8 +819,12 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   ))
   
   result_store <- reactiveVal(list(o3=NULL, pm=NULL))
+  
   o3_sf        <- reactiveVal(NULL)
   pm_sf        <- reactiveVal(NULL)
+  
+  selected_o3 <- reactiveVal(FALSE)
+  selected_pm <- reactiveVal(FALSE)
   
   do_prediction <- function(control_vec, need_o3, need_pm) {
     lock_obj <- acquire_global_lock(timeout = 0)
@@ -864,7 +866,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
           if (!is.null(.models$pm$CMAQ_UNIQUE)) pred[.models$pm$CMAQ_UNIQUE] <- .models$pm$BIAS[.models$pm$CMAQ_UNIQUE]
           pred     <- pred * .models$pm$SCALE
           store$pm <- rowMeans(matrix(pred, nrow=dim(pred)[1]))
-          message(sprintf("[worker] PM2.5: %.3f sec", as.numeric(difftime(Sys.time(), t1, units="secs"))))
+          message(sprintf("[worker] PM₂.₅: %.3f sec", as.numeric(difftime(Sys.time(), t1, units="secs"))))
         }
         list(ok=TRUE, store=store)
       }, error = function(e) list(ok=FALSE, msg=e$message))
@@ -887,15 +889,17 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
                      }
                      
                      store <- res$store
+                     
                      if (need_o3 && !is.null(store$o3)) {
-                       updateProgressBar(session, "pb", value=80, title="Ozone: building map...")
+                       updateProgressBar(session, "pb", value=70, title="Prediction done. Building map...")
                        m_o3 <- .mesh; m_o3$Year <- store$o3; o3_sf(sf::st_make_valid(m_o3))
                      } else { o3_sf(NULL) }
                      
                      if (need_pm && !is.null(store$pm)) {
-                       updateProgressBar(session, "pb", value=90, title="PM2.5: building map...")
                        m_pm <- .mesh; m_pm$Year <- store$pm; pm_sf(sf::st_make_valid(m_pm))
                      } else { pm_sf(NULL) }
+                     
+                     result_store(store)
                      
                      nc <- linear_cache()
                      if (need_o3) nc$o3 <- list(control=control_vec, linear=as.vector(matrix(control_vec,nrow=1) %*% models$o3$WEIGHT))
@@ -903,7 +907,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
                      linear_cache(nc)
                      
                      result_store(store)
-                     updateProgressBar(session, "pb", value=100, title="Completed!")
                      log_message("Total run time: %.3f sec", as.numeric(difftime(Sys.time(), start_time, units="secs")))
                    },
                    onRejected = function(err) {
@@ -928,7 +931,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); return() }
     if (any(m < 0.5 | m > 1.5, na.rm=TRUE)) { showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); return() }
     
-    # 수정
     m_model <- m[region_names_model, ]
     colnames(m_model) <- factor_name_map[colnames(m_model)]
     m_model <- m_model[, factor_names_model]
@@ -936,6 +938,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     
     need_o3     <- "o3"   %in% input$pollutants
     need_pm     <- "pm25" %in% input$pollutants
+    
+    selected_o3(need_o3)
+    selected_pm(need_pm)
     
     if (read_global_status() == "BUSY") {
       pending_run(list(control_vec=control_vec, need_o3=need_o3, need_pm=need_pm))
@@ -1045,8 +1050,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$o3_plot <- renderLeaflet(init_leaflet())
   output$pm_plot <- renderLeaflet(init_leaflet())
   
-  observeEvent(o3_sf(), ignoreInit=TRUE, {
+  observeEvent(o3_sf(), ignoreInit=TRUE, ignoreNULL=FALSE, {
     m <- o3_sf(); if (is.null(m)) { reset_leaflet("o3_plot"); return() }
+    updateProgressBar(session, "pb", value=80, title="Ozone: rendering map...")  # 추가
     session$sendCustomMessage("markRenderStart", list(map_id="o3_plot"))
     t0 <- Sys.time()
     update_leaflet_map("o3_plot", m, paste0("Ozone (", UNIT_O3_TEXT, ")"))
@@ -1054,8 +1060,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     session$sendCustomMessage("probeLeafletRender", list(map_id="o3_plot"))
   })
   
-  observeEvent(pm_sf(), ignoreInit=TRUE, {
+  observeEvent(pm_sf(), ignoreInit=TRUE, ignoreNULL=FALSE, {
     m <- pm_sf(); if (is.null(m)) { reset_leaflet("pm_plot"); return() }
+    val <- if (selected_o3()) 90 else 80
+    updateProgressBar(session, "pb", value=val, title="PM₂.₅: rendering map...")  # 추가
     session$sendCustomMessage("markRenderStart", list(map_id="pm_plot"))
     t0 <- Sys.time()
     update_leaflet_map("pm_plot", m, PM25_FULL_HTML)
@@ -1065,6 +1073,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   observeEvent(input$leaflet_render_done, {
     info <- input$leaflet_render_done
+    if (!selected_o3() || !selected_pm() ||
+        (selected_o3() && selected_pm() && info$map_id == "pm_plot")) {
+      updateProgressBar(session, "pb", value=100, title="Completed!")  # 추가
+    }
     log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
   })
   
