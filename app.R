@@ -304,25 +304,19 @@ ui <- page_fluid(
 
       Shiny.addCustomMessageHandler('savePolicyScroll', function(msg) {
         window.__policyScroll.pageY = window.scrollY || window.pageYOffset || 0;
-
-        var body = document.querySelector('#policy_dt .dataTables_scrollBody');
-        if (body) {
-          window.__policyScroll.tableY = body.scrollTop || 0;
-        } else {
-          window.__policyScroll.tableY = 0;
-        }
       });
-
+      
       Shiny.addCustomMessageHandler('restorePolicyScroll', function(msg) {
-        setTimeout(function() {
-          window.scrollTo(0, window.__policyScroll.pageY || 0);
-
-          var body = document.querySelector('#policy_dt .dataTables_scrollBody');
-          if (body) {
-            body.scrollTop = window.__policyScroll.tableY || 0;
-          }
-        }, 0);
+        var savedY = window.__policyScroll.pageY || 0;
+        $(document).one('shiny:value', function(e) {
+          requestAnimationFrame(function() {
+            requestAnimationFsrame(function() {
+              window.scrollTo(0, savedY);
+            });
+          });
+        });
       });
+      
     "))
   ),
   
@@ -365,10 +359,10 @@ ui <- page_fluid(
                           card_body(
                             h5("How to Use LassoCMAQ", class="fw-bold mb-2"),
                             tags$ul(
-                              tags$li("1. Enter a 17 × 7 emission scenario matrix (Region × Emission Sector) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline)."),
-                              tags$li("2. Select pollutant(s) and click Run to estimate CMAQ-equivalent concentrations for the selected scenario."),
-                              tags$li("3. Inspect maps and summary metrics; click a grid cell to view the top five influential variables for the corresponding region."),
-                              tags$li("4. Download the scenario inputs and the full model results as needed.")
+                              tags$li("Enter a 17 × 7 emission scenario matrix (Region × Emission Sector) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline)."),
+                              tags$li("Select pollutant(s) and click Run to estimate CMAQ-equivalent concentrations for the selected scenario."),
+                              tags$li("Inspect maps and summary metrics; click a grid cell to view the top five influential variables for the corresponding region."),
+                              tags$li("Download the scenario inputs and the full model results as needed.")
                             )
                           )
                      ),
@@ -520,12 +514,6 @@ server <- function(input, output, session) {
            dimnames = list(region_names, factor_names))
   })
   
-  preserve_policy_scroll <- function(expr) {
-    session$sendCustomMessage("savePolicyScroll", list())
-    on.exit(session$sendCustomMessage("restorePolicyScroll", list()), add = TRUE)
-    force(expr)
-  }
-  
   # ---- DT helpers ----
   to_numeric_matrix <- function(df) {
     num_df <- as.data.frame(lapply(df, function(x) suppressWarnings(as.numeric(x))), check.names = FALSE)
@@ -649,7 +637,6 @@ function bindRowInputs(api){
            return;
          }
 
-         Shiny.setInputValue('js_save_scroll', {nonce: Math.random()});
          Shiny.setInputValue('cell_edit', {row: row, col: col, val: val, nonce: Math.random()});
        });
 }
@@ -708,17 +695,15 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     )
   })
   
-  observeEvent(input$js_save_scroll, {
-    session$sendCustomMessage("savePolicyScroll", list())
-  })
-  
   observeEvent(input$cell_edit, {
     info <- input$cell_edit
     i <- as.integer(info$row)
     j <- as.integer(info$col)
     v <- as.numeric(info$val)
     if (is.finite(v) && i >= 1 && j >= 1 && i <= nrow(vals()) && j <= ncol(vals())) {
+      session$sendCustomMessage("savePolicyScroll", list())
       m <- vals(); m[i, j] <- v; vals(m)
+      session$sendCustomMessage("restorePolicyScroll", list())
     }
   })
   
@@ -727,10 +712,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     j <- as.integer(info$col)
     v <- as.numeric(info$val)
     if (is.finite(v) && j >= 1 && j <= ncol(vals())) {
+      session$sendCustomMessage("savePolicyScroll", list())
       m <- vals(); m[, j] <- v; vals(m)
-      preserve_policy_scroll({
-        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
-      })
+      session$sendCustomMessage("restorePolicyScroll", list())
     }
   })
   
@@ -739,20 +723,18 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     i <- as.integer(info$row)
     v <- as.numeric(info$val)
     if (is.finite(v) && i >= 1 && i <= nrow(vals())) {
+      session$sendCustomMessage("savePolicyScroll", list())
       m <- vals(); m[i, ] <- v; vals(m)
-      preserve_policy_scroll({
-        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
-      })
+      session$sendCustomMessage("restorePolicyScroll", list())
     }
   })
   
   observeEvent(input$all_apply, {
     v <- as.numeric(input$all_apply$val)
     if (is.finite(v)) {
-      m <- vals(); m[,] <- v; vals(m)
-      preserve_policy_scroll({
-        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
-      })
+      session$sendCustomMessage("savePolicyScroll", list())
+      m <- vals(); m[, ] <- v; vals(m)
+      session$sendCustomMessage("restorePolicyScroll", list())
     }
   })
   
@@ -786,9 +768,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       }
       
       vals(m)
-      preserve_policy_scroll({
-        replaceData(dataTableProxy("policy_dt"), make_table_data(m), resetPaging = FALSE, rownames = FALSE)
-      })
       
     }, error = function(e) {
       showModal(modalDialog(title = "Upload Error", paste("Failed to apply policy:", e$message), easyClose = TRUE))
@@ -823,7 +802,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     set_global_status("BUSY")
     w$show()
     updateProgressBar(session, "pb", value=0,  title="Initializing...")
-    updateProgressBar(session, "pb", value=10, title="Running prediction (async)...")
+    updateProgressBar(session, "pb", value=10, title="Running prediction...")
     
     .models    <- models
     .mesh      <- mesh
@@ -923,14 +902,14 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       pending_run(list(control_vec=control_vec, need_o3=need_o3, need_pm=need_pm))
       log_message("Run queued: another user is running a prediction")
       showModal(modalDialog(
-        title = "Another Prediction Is Running",
+        title = "Another Prediction in Progress",
         tagList(
-          tags$p("Another user is currently running a prediction."),
+          tags$p("Another user is running a prediction."),
           tags$p(
             "Your scenario has been saved and will run automatically ",
-            "once the current prediction finishes."
+            "once the current prediction is complete."
           ),
-          tags$p("You can monitor the progress in the progress bar.")
+          tags$p("You can track its progress using the progress bar.")
         ),
         footer    = modalButton("Close"),
         easyClose = TRUE
@@ -1056,7 +1035,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       dplyr::mutate(
         SectorFull = unname(sector_map[Input_Sector]),
         SectorFull = ifelse(is.na(SectorFull), "Others", SectorFull),
-        Label      = paste(Input_Region, SectorFull, sep="\n"),
+        Label      = paste(SectorFull, Input_Region, sep="\n"),
         TextColor2 = ifelse(tolower(TextColor) == "red", "#FF0000", "#2E8B57")
       )
   }
@@ -1072,7 +1051,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
                 hjust=-0.08, size=5, show.legend=FALSE, fontface="bold") +
       scale_fill_manual(values=sector_colors) + scale_color_identity() +
       scale_x_continuous(limits=c(0,xmax), expand=expansion(mult=c(0,0.02))) +
-      labs(title=paste0(region), x="Ratio (%)", y="Region-Sector") +
+      labs(title=paste0(region), x="Ratio (%)", y="Sector-Region") +
       annotate("label", x=xmax*0.95, y=0.56, label=sprintf("%.1f%%", top5_sum), size=5, fontface="bold") +
       theme_bw(base_size=16) +
       theme(legend.position="none",
