@@ -21,11 +21,24 @@ suppressPackageStartupMessages({
 plan(multisession, workers = 1)
 
 # -------------------- Constants --------------------
+# UI 표시 순서
 region_names <- c(
+  "Incheon","Gyeonggi","Seoul","Gangwon","Chungbuk","Sejong","Daejeon",
+  "Chungnam","Gyeongbuk","Daegu","Ulsan","Busan","Gyeongnam","Jeonbuk","Gwangju","Jeonnam","Jeju"
+)
+factor_names <- c("Power","Industry","Residential","Solvent","Mobile","Agriculture","Others")
+
+# 모델 입력 순서
+region_names_model <- c(
   "Seoul","Incheon","Busan","Daegu","Gwangju","Gyeonggi","Gangwon","Chungbuk",
   "Chungnam","Gyeongbuk","Gyeongnam","Jeonbuk","Jeonnam","Jeju","Daejeon","Ulsan","Sejong"
 )
-factor_names <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
+factor_names_model <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
+
+factor_name_map <- c(
+  "Power"="Power", "Industry"="Industrial", "Residential"="Residential",
+  "Solvent"="Solvent", "Mobile"="Mobile", "Agriculture"="Agriculture", "Others"="Others"
+)
 
 # -------------------- Global execution lock --------------------
 LOCK_PATH   <- "/tmp/lassocmaq_prediction.lock"
@@ -136,7 +149,6 @@ sector_map <- c(
 sector_colors <- c(
   "Power"       = "#D3D3E8",
   "Industry"    = "#FFC300",
-  "Industrial"  = "#FFC300",
   "Mobile"      = "#FFFFB3",
   "Residential" = "#A2D9CE",
   "Agriculture" = "#E3B8EA",
@@ -261,6 +273,10 @@ td.rowhdr {
  border-radius: 8px;
  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
  z-index: 9999;
+}
+
+sub {
+  line-height: 0;
 }
 ")
 
@@ -536,7 +552,7 @@ server <- function(input, output, session) {
     as.character(
       tags$div(class = "cell-wrapper",
                tags$input(type = "number", step = "0.1", min = "0.5", max = "1.5",
-                          value = format(value, trim = TRUE),
+                          value = formatC(value, format = "f", digits = 1),
                           class = "form-control form-control-sm cell-input",
                           `data-row` = i, `data-col` = j)
       )
@@ -912,7 +928,12 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     if (any(!is.finite(m))) { showModal(modalDialog("All cells must be numeric.", easyClose=TRUE)); return() }
     if (any(m < 0.5 | m > 1.5, na.rm=TRUE)) { showModal(modalDialog("All values must be between 0.5 and 1.5.", easyClose=TRUE)); return() }
     
-    control_vec <- as.numeric(t(m))
+    # 수정
+    m_model <- m[region_names_model, ]
+    colnames(m_model) <- factor_name_map[colnames(m_model)]
+    m_model <- m_model[, factor_names_model]
+    control_vec <- as.numeric(t(m_model))
+    
     need_o3     <- "o3"   %in% input$pollutants
     need_pm     <- "pm25" %in% input$pollutants
     
