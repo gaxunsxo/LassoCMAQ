@@ -310,7 +310,7 @@ ui <- page_fluid(
         var savedY = window.__policyScroll.pageY || 0;
         $(document).one('shiny:value', function(e) {
           requestAnimationFrame(function() {
-            requestAnimationFsrame(function() {
+            requestAnimationFrame(function() {
               window.scrollTo(0, savedY);
             });
           });
@@ -580,7 +580,7 @@ server <- function(input, output, session) {
   
   output$policy_dt <- renderDT({
     datatable(
-      make_table_data(vals()),
+      make_table_data(isolate(vals())),  # add isolate
       container = sketch, rownames = FALSE, escape = FALSE, selection = "none",
       options = list(
         dom = 't', paging = FALSE, searching = FALSE, ordering = FALSE, info = FALSE,
@@ -686,6 +686,11 @@ bindRowInputs(api);
 api.on('draw.dt', function(){ bindRowInputs(api); });
 ")
     )
+  })
+  
+  observe({
+    proxy <- dataTableProxy("policy_dt")
+    replaceData(proxy, make_table_data(vals()), resetPaging = FALSE, rownames = FALSE)
   })
   
   observeEvent(input$range_warning, {
