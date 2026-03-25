@@ -308,11 +308,9 @@ ui <- page_fluid(
       
       Shiny.addCustomMessageHandler('restorePolicyScroll', function(msg) {
         var savedY = window.__policyScroll.pageY || 0;
-        $(document).one('shiny:value', function(e) {
+        requestAnimationFrame(function() {
           requestAnimationFrame(function() {
-            requestAnimationFrame(function() {
-              window.scrollTo(0, savedY);
-            });
+            window.scrollTo(0, savedY);
           });
         });
       });
@@ -688,9 +686,16 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     )
   })
   
+  dt_trigger <- reactiveVal(0)
+  
   observe({
+    vals()
+    dt_trigger(isolate(dt_trigger()) + 1)
+  })
+  
+  observeEvent(dt_trigger(), ignoreInit = FALSE, {
     proxy <- dataTableProxy("policy_dt")
-    replaceData(proxy, make_table_data(vals()), resetPaging = FALSE, rownames = FALSE)
+    replaceData(proxy, make_table_data(isolate(vals())), resetPaging = FALSE, rownames = FALSE)
   })
   
   observeEvent(input$range_warning, {
@@ -720,6 +725,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       session$sendCustomMessage("savePolicyScroll", list())
       m <- vals(); m[, j] <- v; vals(m)
       session$sendCustomMessage("restorePolicyScroll", list())
+      runjs(sprintf(
+        "$('input.col-apply[data-col=\"%d\"]').val('');", j
+      ))
     }
   })
   
@@ -731,6 +739,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       session$sendCustomMessage("savePolicyScroll", list())
       m <- vals(); m[i, ] <- v; vals(m)
       session$sendCustomMessage("restorePolicyScroll", list())
+      runjs(sprintf(
+        "$('input.row-input[data-row=\"%d\"]').val('');", i
+      ))
     }
   })
   
@@ -740,6 +751,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       session$sendCustomMessage("savePolicyScroll", list())
       m <- vals(); m[, ] <- v; vals(m)
       session$sendCustomMessage("restorePolicyScroll", list())
+      runjs("$('input.all-apply').val('');")
     }
   })
   
@@ -772,7 +784,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         return()
       }
       
+      session$sendCustomMessage("savePolicyScroll", list())
       vals(m)
+      session$sendCustomMessage("restorePolicyScroll", list())
       
     }, error = function(e) {
       showModal(modalDialog(title = "Upload Error", paste("Failed to apply policy:", e$message), easyClose = TRUE))
@@ -892,7 +906,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   # ── btn_run ────────────────────────────────────────────────────────────────
   observeEvent(input$btn_run, {
-    runjs("document.getElementById('outputs').scrollIntoView({behavior:'smooth', block:'start'});")
     req(input$pollutants)
     
     m <- vals()
@@ -922,6 +935,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       return()
     }
     
+    reset_leaflet("o3_plot")
+    reset_leaflet("pm_plot")
+    
+    runjs("document.getElementById('outputs').scrollIntoView({behavior:'smooth', block:'start'});")
     do_prediction(control_vec, need_o3, need_pm)
   })
   
