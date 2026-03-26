@@ -75,18 +75,15 @@ release_global_lock <- function(lock_obj) {
 
 # ------------------ Units & Labels ------------------
 # O3
-UNIT_O3_TEXT  <- "ppb"
 O3_LABEL_TEXT <- "Ozone"
+UNIT_O3_TEXT  <- "ppb"
 
-# PM₂.₅ 
-PM25_LABEL_TEXT <- "PM₂.₅"
-PM25_LABEL_HTML <- "PM₂.₅"
-
-UNIT_PM_TEXT <- "µg/m³"
+# PM2.5
+PM25_LABEL_HTML <- 'PM<span style="font-size:0.6em;">2.5</span>'
+PM25_LABEL_EXPR <- expression(bold(PM[2.5]))
 UNIT_PM_HTML <- "&micro;g/m<sup>3</sup>"
-
-PM25_FULL_TEXT <- paste0(PM25_LABEL_TEXT, " (", UNIT_PM_TEXT, ")")
-PM25_FULL_HTML <- paste0(PM25_LABEL_HTML, " (", UNIT_PM_HTML, ")")
+UNIT_PM_EXPR <- expression(mu*g/m^3)
+UNIT_PM_TEXT <- "µg/m³"
 
 # -------------------- Load spatial & model objects --------------------
 asia_map <- st_read("/ext_hdd_data1/geseo/LassoCMAQ_Data/Mapping_shp/Asia_county_map.shp", quiet = TRUE)
@@ -363,7 +360,11 @@ ui <- page_fluid(
                             h5("What Is LassoCMAQ", class="fw-bold mb-2"),
                             tags$ul(
                               tags$li("LassoCMAQ is a computationally efficient reduced-form CMAQ model, developed using the least absolute shrinkage and selection operator (LASSO) together with an adaptive logit transformation of the response variable."),
-                              tags$li("It estimates ozone and PM₂.₅ concentrations from regional emission-control scenarios in about 30 seconds per scenario. The model computes concentrations for every grid cell at every hour, enabling rapid what-if exploration without running CMAQ.")
+                              tags$li(HTML(paste0(
+                                "It estimates ozone and ",
+                                PM25_LABEL_HTML,
+                                " concentrations from regional emission-control scenarios in about 30 seconds per scenario. The model computes concentrations for every grid cell at every hour, enabling rapid what-if exploration without running CMAQ."
+                              )))
                             )
                           )
                      ),
@@ -382,7 +383,11 @@ ui <- page_fluid(
                           card_body(
                             h5("Citation", class="fw-bold mb-2"),
                             tags$blockquote(
-                              "D.-B. Lee et al., A LASSO-based reduced-form CMAQ model for predicting ozone and PM₂.₅ responses to emission changes in South Korea (submitted)"
+                              HTML(paste0(
+                                "D.-B. Lee et al., A LASSO-based reduced-form CMAQ model for predicting ozone and ",
+                                PM25_LABEL_HTML,
+                                " responses to emission changes in South Korea (submitted)"
+                              ))
                             )
                           )
                      )
@@ -421,7 +426,9 @@ ui <- page_fluid(
                        ),
                        card(header="Run Prediction", class="section-block card-compact",
                             checkboxGroupInput("pollutants","Select pollutant(s)",
-                                               choices = c("Ozone" = "o3", "PM₂.₅" = "pm25"),
+                                               choiceNames = list("Ozone",
+                                                                  HTML(PM25_LABEL_HTML)),
+                                               choiceValues = c("o3","pm25"),
                                                selected = c("o3","pm25")),
                             actionButton("btn_run","Run", class="btn btn-outline-primary btn-sm w-100")
                        )
@@ -444,7 +451,7 @@ ui <- page_fluid(
                           )
                      ),
                      card(class = "section-block",
-                          h4(HTML("PM₂.₅"), class = "fw-bold mb-3"),
+                          h4(HTML(PM25_LABEL_HTML), class = "fw-bold mb-3"),
                           leafletOutput("pm_plot", height = "680px") %>% withSpinner(),
                           layout_columns(col_widths = c(6, 6),
                                          card(header = "Grid Average", textOutput("pm_mean")),
@@ -807,7 +814,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     })
   })
   
-  # ── Models & reactive stores ───────────────────────────────────────────────
+  # -------------------- Models & reactive stores --------------------
   models <- list(
     o3 = list(WEIGHT=O3_WEIGHT, BIAS=O3_BIAS, ADAPT=O3_Adapt, CMAQ_UNIQUE=O3_CMAQ_UNIQUE, SCALE=1000),
     pm = list(WEIGHT=PM_WEIGHT, BIAS=PM_BIAS, ADAPT=PM_Adapt, CMAQ_UNIQUE=PM_CMAQ_UNIQUE, SCALE=1)
@@ -923,7 +930,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     NULL
   }
   
-  # ── btn_run ────────────────────────────────────────────────────────────────
+  # -------------------- btn_run --------------------
   observeEvent(input$btn_run, {
     req(input$pollutants)
     
@@ -968,7 +975,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     do_prediction(control_vec, need_o3, need_pm)
   })
   
-  # ── Leaflet ────────────────────────────────────────────────────────────────
+  # -------------------- Leaflet --------------------
   init_leaflet <- function() {
     leaflet(options = leafletOptions(preferCanvas=FALSE)) %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
@@ -1051,38 +1058,50 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   output$pm_plot <- renderLeaflet(init_leaflet())
   
   observeEvent(o3_sf(), ignoreInit=TRUE, ignoreNULL=FALSE, {
-    m <- o3_sf(); if (is.null(m)) { reset_leaflet("o3_plot"); return() }
-    updateProgressBar(session, "pb", value=80, title="Ozone: rendering map...")  # 추가
+    m <- o3_sf(); if (is.null(m)) { 
+      reset_leaflet("o3_plot"); return() 
+    }
+    
+    updateProgressBar(session, "pb", value=80, 
+                      title="Ozone: rendering map...")
     session$sendCustomMessage("markRenderStart", list(map_id="o3_plot"))
     t0 <- Sys.time()
     update_leaflet_map("o3_plot", m, paste0("Ozone (", UNIT_O3_TEXT, ")"))
+    
     log_message("Server leaflet build: o3 = %.3f sec", as.numeric(difftime(Sys.time(), t0, units="secs")))
     session$sendCustomMessage("probeLeafletRender", list(map_id="o3_plot"))
   })
   
   observeEvent(pm_sf(), ignoreInit=TRUE, ignoreNULL=FALSE, {
-    m <- pm_sf(); if (is.null(m)) { reset_leaflet("pm_plot"); return() }
+    m <- pm_sf(); if (is.null(m)) { 
+      reset_leaflet("pm_plot"); return() 
+    }
+    
     val <- if (selected_o3()) 90 else 80
-    updateProgressBar(session, "pb", value=val, title="PM₂.₅: rendering map...")  # 추가
+    updateProgressBar(session, "pb", value=val, 
+                      title = paste0(PM25_LABEL_HTML,": rendering map..."))
     session$sendCustomMessage("markRenderStart", list(map_id="pm_plot"))
     t0 <- Sys.time()
-    update_leaflet_map("pm_plot", m, PM25_FULL_HTML)
+    update_leaflet_map("pm_plot", m, paste0(PM25_LABEL_HTML, " (", UNIT_PM_HTML, ")"))
+    
     log_message("Server leaflet build: pm = %.3f sec", as.numeric(difftime(Sys.time(), t0, units="secs")))
     session$sendCustomMessage("probeLeafletRender", list(map_id="pm_plot"))
   })
   
   observeEvent(input$leaflet_render_done, {
     info <- input$leaflet_render_done
+    
     if (!selected_o3() || !selected_pm() ||
         (selected_o3() && selected_pm() && info$map_id == "pm_plot")) {
-      updateProgressBar(session, "pb", value=100, title="Completed!")  # 추가
+      updateProgressBar(session, "pb", value=100, title="Completed!")
     }
     log_message("Plot finished rendering in browser: %s (%.3f sec)", info$map_id, as.numeric(info$elapsed))
   })
   
-  # ── Weight popup ───────────────────────────────────────────────────────────
+  # -------------------- Weight popup --------------------
   get_weight_top5 <- function(region, pollutant) {
     df <- if (pollutant == "o3") O3_weight_summary else PM_weight_summary
+    
     df %>%
       dplyr::filter(Target_Region == region) %>%
       dplyr::arrange(desc(Weight_Ratio)) %>%
@@ -1098,8 +1117,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   make_weight_plot <- function(region, pollutant) {
     df <- get_weight_top5(region, pollutant)
     if (nrow(df) == 0) return(NULL)
+    
     top5_sum <- sum(df$Weight_Ratio, na.rm=TRUE)
     xmax     <- max(df$Weight_Ratio, na.rm=TRUE) * 1.40
+    
     ggplot(df, aes(x=Weight_Ratio, y=reorder(Label, Weight_Ratio), fill=SectorFull)) +
       geom_col(width=0.7, color="black") +
       geom_text(aes(label=sprintf("%.1f%%", Weight_Ratio), color=TextColor2),
@@ -1125,8 +1146,13 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   observeEvent(input$o3_plot_shape_click, ignoreInit=TRUE, {
     id <- input$o3_plot_shape_click$id; req(id)
-    rc <- strsplit(id,"_")[[1]]; r <- as.numeric(rc[1]); c <- as.numeric(rc[2])
-    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% dplyr::pull(Region_Name) %>% unique()
+    rc <- strsplit(id,"_")[[1]];
+    r <- as.numeric(rc[1]); 
+    c <- as.numeric(rc[2])
+    
+    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% 
+      dplyr::pull(Region_Name) %>% unique()
+    
     req(length(region) > 0)
     leafletProxy("o3_plot") %>% clearPopups() %>%
       addPopups(lng=input$o3_plot_shape_click$lng, lat=input$o3_plot_shape_click$lat,
@@ -1135,15 +1161,20 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   observeEvent(input$pm_plot_shape_click, ignoreInit=TRUE, {
     id <- input$pm_plot_shape_click$id; req(id)
-    rc <- strsplit(id,"_")[[1]]; r <- as.numeric(rc[1]); c <- as.numeric(rc[2])
-    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% dplyr::pull(Region_Name) %>% unique()
+    rc <- strsplit(id,"_")[[1]];
+    r <- as.numeric(rc[1]); 
+    
+    c <- as.numeric(rc[2])
+    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% 
+      dplyr::pull(Region_Name) %>% unique()
+    
     req(length(region) > 0)
     leafletProxy("pm_plot") %>% clearPopups() %>%
       addPopups(lng=input$pm_plot_shape_click$lng, lat=input$pm_plot_shape_click$lat,
                 popup=plot_to_popup(make_weight_plot(region[1],"pm")), options=popupOptions(maxWidth=560))
   })
   
-  # ── Text outputs ───────────────────────────────────────────────────────────
+  # -------------------- Text outputs --------------------
   output$o3_mean <- renderText({
     m <- o3_sf(); req(!is.null(m))
     paste0("Annual average across all cells: ", sprintf("%.1f %s", mean(m$Year, na.rm=TRUE), UNIT_O3_TEXT))
@@ -1161,7 +1192,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
     paste0("Annual range across all cells: ", sprintf("%.1f - %.1f %s", rng[1], rng[2], UNIT_PM_TEXT))
   })
   
-  # ── Downloads ──────────────────────────────────────────────────────────────
+  # -------------------- Downloads --------------------
   output$dl_scenario <- downloadHandler(
     filename = function() paste0("control_scenario_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
     content  = function(file) {
