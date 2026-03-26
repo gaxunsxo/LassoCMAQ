@@ -370,7 +370,7 @@ ui <- page_fluid(
                      card(class = "section-block",
                           card_body(
                             h5("How to Use LassoCMAQ", class="fw-bold mb-2"),
-                            tags$ul(
+                            tags$ol(
                               tags$li("Enter a 17 × 7 emission scenario matrix (Region × Emission Sector) specifying emission change ratios (e.g., 0.9 = 10% reduction from the baseline)."),
                               tags$li("Select pollutant(s) and click Run to estimate CMAQ-equivalent concentrations for the selected scenario."),
                               tags$li("Inspect maps and summary metrics; click a grid cell to view the top five influential variables for the corresponding region."),
