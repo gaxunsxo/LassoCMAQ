@@ -17,7 +17,6 @@ suppressPackageStartupMessages({
   library(future)
   library(promises)
 })
-
 plan(multisession, workers = 1)
 
 # -------------------- Constants --------------------
@@ -26,13 +25,11 @@ region_names <- c(
   "Chungnam","Gyeongbuk","Daegu","Ulsan","Busan","Gyeongnam","Jeonbuk","Gwangju","Jeonnam","Jeju"
 )
 factor_names <- c("Power","Industry","Residential","Solvent","Mobile","Agriculture","Others")
-
 region_names_model <- c(
   "Seoul","Incheon","Busan","Daegu","Gwangju","Gyeonggi","Gangwon","Chungbuk",
   "Chungnam","Gyeongbuk","Gyeongnam","Jeonbuk","Jeonnam","Jeju","Daejeon","Ulsan","Sejong"
 )
 factor_names_model <- c("Power","Industrial","Mobile","Residential","Agriculture","Solvent","Others")
-
 factor_name_map <- c(
   "Power"="Power", "Industry"="Industrial", "Residential"="Residential",
   "Solvent"="Solvent", "Mobile"="Mobile", "Agriculture"="Agriculture", "Others"="Others"
@@ -41,32 +38,24 @@ factor_name_map <- c(
 # -------------------- Global execution lock --------------------
 LOCK_PATH   <- "/tmp/lassocmaq_prediction.lock"
 STATUS_PATH <- "/tmp/lassocmaq_status.txt"
-
 writeLines("IDLE", STATUS_PATH)
-
 set_global_status <- function(status) {
   try(writeLines(status, STATUS_PATH), silent = TRUE)
 }
-
 read_global_status <- function() {
   tryCatch(readLines(STATUS_PATH, n = 1, warn = FALSE), error = function(e) "IDLE")
 }
-
 acquire_global_lock <- function(timeout = 0) {
   dir.create(dirname(LOCK_PATH), recursive = TRUE, showWarnings = FALSE)
-  
   if (!file.exists(LOCK_PATH)) {
     ok <- file.create(LOCK_PATH)
     if (!ok) stop("Failed to create lock file.")
   }
-  
-  result <- tryCatch(
+  tryCatch(
     filelock::lock(LOCK_PATH, timeout = timeout),
     error = function(e) NULL
   )
-  result
 }
-
 release_global_lock <- function(lock_obj) {
   if (!is.null(lock_obj)) {
     try(filelock::unlock(lock_obj), silent = TRUE)
@@ -74,24 +63,29 @@ release_global_lock <- function(lock_obj) {
 }
 
 # ------------------ Units & Labels ------------------
-# O3
 O3_LABEL_TEXT <- "Ozone"
 UNIT_O3_TEXT  <- "ppb"
-
-# PM2.5
 PM25_LABEL_HTML <- 'PM<span style="font-size:0.6em;">2.5</span>'
 PM25_LABEL_EXPR <- expression(bold(PM[2.5]))
 UNIT_PM_HTML <- "&micro;g/m<sup>3</sup>"
 UNIT_PM_EXPR <- expression(mu*g/m^3)
 UNIT_PM_TEXT <- "µg/m³"
 
+# -------------------- Startup timing helper --------------------
+.startup_t0 <- Sys.time()
+log_startup <- function(fmt, ...) {
+  ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  elapsed <- as.numeric(difftime(Sys.time(), .startup_t0, units = "secs"))
+  message(sprintf(paste0("[%s] [startup +%6.1fs] ", fmt), ts, elapsed, ...))
+}
+log_startup("Begin global load")
+
 # -------------------- Load spatial & model objects --------------------
-asia_map <- st_read("/ext_hdd_data1/geseo/LassoCMAQ_Data/Mapping_shp/Asia_county_map.shp", quiet = TRUE)
-mesh     <- st_read("/ext_hdd_data1/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp", quiet = TRUE)
-st_crs(asia_map) <- 4326
+log_startup("Reading shapefiles (mesh)...")
+mesh <- st_read("/ext_hdd_data1/geseo/LassoCMAQ_Data/Mapping_shp/Mesh_test_shift2.shp", quiet = TRUE)
 st_crs(mesh) <- 4326
-asia_map <- st_make_valid(asia_map)
-mesh     <- st_make_valid(mesh)
+mesh <- st_make_valid(mesh)
+log_startup("Shapefile read + validated (mesh: %d features)", nrow(mesh))
 
 # -------------------- Load region map --------------------
 region_map <- read.csv("/ext_hdd_data1/geseo/LassoCMAQ_Data/Grid-based Regional Allocation Ratio for 17 Municipalities_UPDATED.csv")
@@ -99,6 +93,7 @@ region_map_clean <- region_map %>%
   group_by(Column, Row) %>%
   slice_max(order_by = X., n = 1, with_ties = FALSE) %>%
   ungroup()
+log_startup("region_map loaded")
 
 # -------------------- Compute CMAQ grid coordinates --------------------
 nx <- 67
@@ -112,23 +107,16 @@ mesh <- mesh %>%
             by = c("Column","Row")) %>%
   st_make_valid()
 
-# -------------------- Region outline (dissolve) --------------------
-region_outline <- mesh %>%
-  filter(!is.na(Region_Name), Region_Name != "") %>%
-  group_by(Region_Name) %>%
-  summarise(geometry = st_union(geometry), .groups = "drop") %>%
-  st_make_valid()
-
 # -------------------- Load weight summary --------------------
 O3_weight_summary <- read.csv(
-  "/ext_hdd_data1/geseo/LassoCMAQ_Data/O3_Weight_Summary.csv",
+  "/ext_hdd_data1/geseo/LassoCMAQ_Data/O3_Weight_Summary_new.csv",
   stringsAsFactors = FALSE
 )
-
 PM_weight_summary <- read.csv(
-  "/ext_hdd_data1/geseo/LassoCMAQ_Data/PM_Weight_Summary.csv",
+  "/ext_hdd_data1/geseo/LassoCMAQ_Data/PM_Weight_Summary_new.csv",
   stringsAsFactors = FALSE
 )
+log_startup("Weight summary CSVs loaded")
 
 # -------------------- Sector mapping --------------------
 sector_map <- c(
@@ -140,7 +128,6 @@ sector_map <- c(
   "SOL" = "Solvent",
   "OTH" = "Others"
 )
-
 sector_colors <- c(
   "Power"       = "#D3D3E8",
   "Industry"    = "#FFC300",
@@ -152,17 +139,20 @@ sector_colors <- c(
 )
 
 # -------------------- Load model objects --------------------
-# Ozone
+log_startup("Loading O3 model .RData...")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_CMAQ_UNIQUE.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_BIAS.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_ADAPT.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/O3/Adaptive_logit/Total/O3_WEIGHT.RData")
+log_startup("O3 model .RData loaded (BIAS: %s)", paste(dim(O3_BIAS), collapse=" x "))
 
-# PM₂.₅ 
+log_startup("Loading PM model .RData...")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_WEIGHT.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_CMAQ_UNIQUE.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_BIAS.RData")
 load("/ext_hdd_data1/geseo/LassoCMAQ_Data/PM/Total/PM_ADAPT.RData")
+log_startup("PM model .RData loaded (BIAS: %s)", paste(dim(PM_BIAS), collapse=" x "))
+log_startup("Global load complete -- app is ready to accept sessions")
 
 # -------------------- Theme & CSS --------------------
 theme <- bs_theme(
@@ -170,7 +160,6 @@ theme <- bs_theme(
   base_font = font_google("Inter"),
   heading_font = font_google("Inter")
 )
-
 custom_css <- HTML("
 html { scroll-behavior: smooth; scroll-padding-top: 20px; }
 body { padding: 0 48px 48px 48px; }
@@ -180,13 +169,11 @@ body { padding: 0 48px 48px 48px; }
 .hero { padding: 28px 0 8px; margin-bottom: 4px; }
 .muted { color:#6c757d; }
 .copyright { border-top: 1px solid #e9ecef; padding: 12px 0; margin-top: 24px; }
-
 .card-compact .card-header { padding: 6px 10px; }
 .card-compact .card-body   { padding: 8px 10px; }
 .card-compact .form-check-label,
 .card-compact label { font-size: 0.92rem; }
 .card-compact .form-control-sm { height: 28px; padding: 2px 6px; }
-
 .custom-table .card-body{
   min-height: 720px;
   overflow-y: auto;
@@ -198,16 +185,13 @@ body { padding: 0 48px 48px 48px; }
   max-height: none !important;
   height: auto !important;
 }
-
 .custom-table .dataTables_wrapper { width: 100%; }
 table.dataTable { table-layout: fixed; width: 100% !important; }
 table.dataTable td, table.dataTable th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
 .dataTables_wrapper .dataTables_info,
 .dataTables_wrapper .dataTables_paginate,
 .dataTables_wrapper .dataTables_length,
 .dataTables_wrapper .dataTables_filter { display: none !important; }
-
 table.dataTable thead th {
   vertical-align: bottom;
   background: #E5F0FB;
@@ -243,7 +227,6 @@ td.rowhdr {
 }
 .rowhdr .rname { font-weight: 600; margin-bottom: 4px; display:block; }
 .rowhdr .row-input { width: 160px; }
-
 .cell-wrapper { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
 .cell-wrapper .cell-input { margin-top: auto; }
 .cell-input {
@@ -258,7 +241,6 @@ td.rowhdr {
   background-color: transparent !important;
   box-shadow: none;
 }
-
 .shiny-notification {
  position: fixed;
  top: 80px;
@@ -269,7 +251,6 @@ td.rowhdr {
  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
  z-index: 9999;
 }
-
 sub {
   line-height: 0;
 }
@@ -310,13 +291,11 @@ ui <- page_fluid(
           });
         });
       });
-
       window.__policyScroll = { pageY: 0, tableY: 0 };
-
       Shiny.addCustomMessageHandler('savePolicyScroll', function(msg) {
         window.__policyScroll.pageY = window.scrollY || window.pageYOffset || 0;
       });
-      
+
       Shiny.addCustomMessageHandler('restorePolicyScroll', function(msg) {
         var savedY = window.__policyScroll.pageY || 0;
         requestAnimationFrame(function() {
@@ -325,7 +304,7 @@ ui <- page_fluid(
           });
         });
       });
-      
+
     "))
   ),
   
@@ -505,12 +484,15 @@ server <- function(input, output, session) {
       req_data <- pending_run()
       pending_run(NULL)
       removeModal()
+      
+      selected_o3(req_data$need_o3)
+      selected_pm(req_data$need_pm)
+      
       log_message("IDLE detected: firing pending prediction")
       do_prediction(req_data$control_vec, req_data$need_o3, req_data$need_pm)
     }
   })
   
-  # Logging
   log_file <- "run.log"
   log_message <- function(fmt, ...) {
     ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
@@ -520,20 +502,17 @@ server <- function(input, output, session) {
     cat(line, file = log_file, append = TRUE)
   }
   
-  # Loading overlay
   w <- Waiter$new(
     id = c("o3_plot","pm_plot"),
     html = tagList(spin_fading_circles(), h4("Running prediction, please wait...")),
     color = "#ffffff"
   )
   
-  # Policy matrix
   vals <- reactiveVal({
     matrix(1, nrow = length(region_names), ncol = length(factor_names),
            dimnames = list(region_names, factor_names))
   })
   
-  # ---- DT helpers ----
   to_numeric_matrix <- function(df) {
     num_df <- as.data.frame(lapply(df, function(x) suppressWarnings(as.numeric(x))), check.names = FALSE)
     m <- as.matrix(num_df)
@@ -599,7 +578,7 @@ server <- function(input, output, session) {
   
   output$policy_dt <- renderDT({
     datatable(
-      make_table_data(isolate(vals())),  # add isolate
+      make_table_data(isolate(vals())),
       container = sketch, rownames = FALSE, escape = FALSE, selection = "none",
       options = list(
         dom = 't', paging = FALSE, searching = FALSE, ordering = FALSE, info = FALSE,
@@ -612,15 +591,12 @@ server <- function(input, output, session) {
       callback = JS("
 function inRange(v){ return (v >= 0.5 && v <= 1.5); }
 function isNum(v){ return !isNaN(v) && isFinite(v); }
-
 function bindRowInputs(api){
   var tbody = $(api.table().body());
-
   tbody.off('focusin', 'input.row-input, input.cell-input')
        .on('focusin', 'input.row-input, input.cell-input', function(){
          this.dataset.prev = this.value;
        });
-
   tbody.off('change', 'input.row-input')
        .on('change', 'input.row-input', function(){
          var row = parseInt($(this).attr('data-row'), 10);
@@ -638,7 +614,6 @@ function bindRowInputs(api){
          }
          Shiny.setInputValue('row_apply', {row: row, val: val, nonce: Math.random()});
        });
-
   tbody.off('change', 'input.cell-input')
        .on('change', 'input.cell-input', function(){
          var row = parseInt($(this).attr('data-row'), 10);
@@ -655,13 +630,10 @@ function bindRowInputs(api){
            });
            return;
          }
-
          Shiny.setInputValue('cell_edit', {row: row, col: col, val: val, nonce: Math.random()});
        });
 }
-
 var api = table;
-
 $(api.table().header())
   .off('focusin', 'input.col-apply, input.all-apply')
   .on('focusin', 'input.col-apply, input.all-apply', function(){
@@ -700,7 +672,6 @@ $(api.table().header())
     }
     Shiny.setInputValue('all_apply', {val: val, nonce: Math.random()});
   });
-
 bindRowInputs(api);
 api.on('draw.dt', function(){ bindRowInputs(api); });
 ")
@@ -862,7 +833,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
           pred     <- .models$o3$ADAPT / (1 + exp(-(la + .models$o3$BIAS)))
           if (!is.null(.models$o3$CMAQ_UNIQUE)) pred[.models$o3$CMAQ_UNIQUE] <- .models$o3$BIAS[.models$o3$CMAQ_UNIQUE]
           pred     <- pred * .models$o3$SCALE
-          store$o3 <- rowMeans(matrix(pred, nrow=dim(pred)[1]))
+          store$o3 <- pred
           message(sprintf("[worker] O3: %.3f sec", as.numeric(difftime(Sys.time(), t1, units="secs"))))
         }
         if (need_pm) {
@@ -872,7 +843,7 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
           pred     <- .models$pm$ADAPT / (1 + exp(-(la + .models$pm$BIAS)))
           if (!is.null(.models$pm$CMAQ_UNIQUE)) pred[.models$pm$CMAQ_UNIQUE] <- .models$pm$BIAS[.models$pm$CMAQ_UNIQUE]
           pred     <- pred * .models$pm$SCALE
-          store$pm <- rowMeans(matrix(pred, nrow=dim(pred)[1]))
+          store$pm <- pred
           message(sprintf("[worker] PM₂.₅: %.3f sec", as.numeric(difftime(Sys.time(), t1, units="secs"))))
         }
         list(ok=TRUE, store=store)
@@ -899,11 +870,15 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
                      
                      if (need_o3 && !is.null(store$o3)) {
                        updateProgressBar(session, "pb", value=70, title="Prediction done. Building map...")
-                       m_o3 <- .mesh; m_o3$Year <- store$o3; o3_sf(sf::st_make_valid(m_o3))
+                       m_o3 <- .mesh
+                       m_o3$Year <- rowMeans(matrix(store$o3, nrow = dim(store$o3)[1]))
+                       o3_sf(sf::st_make_valid(m_o3))
                      } else { o3_sf(NULL) }
                      
                      if (need_pm && !is.null(store$pm)) {
-                       m_pm <- .mesh; m_pm$Year <- store$pm; pm_sf(sf::st_make_valid(m_pm))
+                       m_pm <- .mesh
+                       m_pm$Year <- rowMeans(matrix(store$pm, nrow = dim(store$pm)[1]))
+                       pm_sf(sf::st_make_valid(m_pm))
                      } else { pm_sf(NULL) }
                      
                      result_store(store)
@@ -913,7 +888,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
                      if (need_pm) nc$pm <- list(control=control_vec, linear=as.vector(matrix(control_vec,nrow=1) %*% models$pm$WEIGHT))
                      linear_cache(nc)
                      
-                     result_store(store)
                      log_message("Total run time: %.3f sec", as.numeric(difftime(Sys.time(), start_time, units="secs")))
                    },
                    onRejected = function(err) {
@@ -977,11 +951,9 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   
   # -------------------- Leaflet --------------------
   init_leaflet <- function() {
-    leaflet(options = leafletOptions(preferCanvas=FALSE)) %>%
+    leaflet(options = leafletOptions(preferCanvas=TRUE)) %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
-      setView(lng=127.8, lat=36.2, zoom=6) %>%
-      addPolygons(data=asia_map, fill=FALSE, color="#444444", weight=1, opacity=0.9,
-                  group="boundary", options=pathOptions(interactive=FALSE))
+      setView(lng=127.8, lat=36.2, zoom=6)
   }
   
   reset_leaflet <- function(map_id) {
@@ -1015,17 +987,13 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
         lng2 = bb["xmax"], lat2 = bb["ymax"]
       ) %>%
       addPolygons(
-        # Fill
         fillColor   = ~pal(Year),
         fillOpacity = 0.7,
-        # Border
         color   = "#555555",
         weight  = 0.4,
         opacity = 0.5,
-        # Identity
         group   = "mesh",
         layerId = ~paste0(Row, "_", Column),
-        # Hover label
         label        = ~sprintf("Region: %s, Value: %.1f", Region_Name, Year),
         labelOptions = labelOptions(
           direction = "auto",
@@ -1034,7 +1002,6 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
           sticky    = FALSE,
           style     = list("font-weight" = "normal", "padding" = "4px 8px")
         ),
-        # Hover highlight
         highlightOptions = highlightOptions(
           weight      = 0.4,
           opacity     = 0.5,
@@ -1054,15 +1021,25 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
       )
   }
   
-  output$o3_plot <- renderLeaflet(init_leaflet())
-  output$pm_plot <- renderLeaflet(init_leaflet())
+  output$o3_plot <- renderLeaflet({
+    t0 <- Sys.time()
+    m  <- init_leaflet()
+    log_message("Session init_leaflet (o3_plot): %.3f sec", as.numeric(difftime(Sys.time(), t0, units = "secs")))
+    m
+  })
+  output$pm_plot <- renderLeaflet({
+    t0 <- Sys.time()
+    m  <- init_leaflet()
+    log_message("Session init_leaflet (pm_plot): %.3f sec", as.numeric(difftime(Sys.time(), t0, units = "secs")))
+    m
+  })
   
   observeEvent(o3_sf(), ignoreInit=TRUE, ignoreNULL=FALSE, {
-    m <- o3_sf(); if (is.null(m)) { 
-      reset_leaflet("o3_plot"); return() 
+    m <- o3_sf(); if (is.null(m)) {
+      reset_leaflet("o3_plot"); return()
     }
     
-    updateProgressBar(session, "pb", value=80, 
+    updateProgressBar(session, "pb", value=80,
                       title="Ozone: rendering map...")
     session$sendCustomMessage("markRenderStart", list(map_id="o3_plot"))
     t0 <- Sys.time()
@@ -1073,12 +1050,12 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   })
   
   observeEvent(pm_sf(), ignoreInit=TRUE, ignoreNULL=FALSE, {
-    m <- pm_sf(); if (is.null(m)) { 
-      reset_leaflet("pm_plot"); return() 
+    m <- pm_sf(); if (is.null(m)) {
+      reset_leaflet("pm_plot"); return()
     }
     
     val <- if (selected_o3()) 90 else 80
-    updateProgressBar(session, "pb", value=val, 
+    updateProgressBar(session, "pb", value=val,
                       title = paste0(PM25_LABEL_HTML,": rendering map..."))
     session$sendCustomMessage("markRenderStart", list(map_id="pm_plot"))
     t0 <- Sys.time()
@@ -1147,10 +1124,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   observeEvent(input$o3_plot_shape_click, ignoreInit=TRUE, {
     id <- input$o3_plot_shape_click$id; req(id)
     rc <- strsplit(id,"_")[[1]];
-    r <- as.numeric(rc[1]); 
+    r <- as.numeric(rc[1]);
     c <- as.numeric(rc[2])
     
-    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% 
+    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>%
       dplyr::pull(Region_Name) %>% unique()
     
     req(length(region) > 0)
@@ -1162,10 +1139,10 @@ api.on('draw.dt', function(){ bindRowInputs(api); });
   observeEvent(input$pm_plot_shape_click, ignoreInit=TRUE, {
     id <- input$pm_plot_shape_click$id; req(id)
     rc <- strsplit(id,"_")[[1]];
-    r <- as.numeric(rc[1]); 
+    r <- as.numeric(rc[1]);
     
     c <- as.numeric(rc[2])
-    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>% 
+    region <- mesh %>% dplyr::filter(Row==r, Column==c) %>%
       dplyr::pull(Region_Name) %>% unique()
     
     req(length(region) > 0)
